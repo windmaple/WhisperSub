@@ -27,6 +27,8 @@ public struct VideoMetadata: Sendable {
 
 public enum VideoSubtitleBurnerError: LocalizedError {
     case noVideoTrack
+    case invalidClipRange(String)
+    case clipFailed(String)
     case audioExtractionFailed(String)
     case exportSessionCreationFailed
     case exportFailed(String)
@@ -36,6 +38,10 @@ public enum VideoSubtitleBurnerError: LocalizedError {
         switch self {
         case .noVideoTrack:
             return "The selected file does not contain a valid video track."
+        case .invalidClipRange(let reason):
+            return "Invalid clip time range: \(reason)"
+        case .clipFailed(let reason):
+            return "Failed to clip video: \(reason)"
         case .audioExtractionFailed(let reason):
             return "Could not extract audio from video: \(reason)"
         case .exportSessionCreationFailed:
@@ -603,6 +609,181 @@ public enum VideoSubtitleBurner {
                 let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                 let errString = String(data: errData, encoding: .utf8) ?? "ffmpeg exited with code \(process.terminationStatus)"
                 throw VideoSubtitleBurnerError.exportFailed(errString)
+            }
+            progressHandler(1.0)
+        }.value
+    }
+
+    /// Clips the video at `sourceURL` from `startTime` to `endTime` and writes an `.mp4` file to `outputURL`, reporting progress `0.0...1.0`.
+    public static func clipVideo(
+        sourceURL: URL,
+        outputURL: URL,
+        startTime: TimeInterval,
+        endTime: TimeInterval,
+        progressHandler: @escaping @Sendable (Double) -> Void = { _ in }
+    ) async throws {
+        let clampedStart = max(0, startTime)
+        guard endTime > clampedStart + 0.05 else {
+            throw VideoSubtitleBurnerError.invalidClipRange("End time (\(SRTFormatter.formatShortTimestamp(endTime))) must be greater than start time (\(SRTFormatter.formatShortTimestamp(clampedStart))).")
+        }
+
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        let clipDuration = endTime - clampedStart
+        let asset = AVURLAsset(url: sourceURL)
+        let nativeVideoTracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
+
+        if nativeVideoTracks.isEmpty {
+            guard let ffmpegPath = findExecutable(named: "ffmpeg") else {
+                throw VideoSubtitleBurnerError.noVideoTrack
+            }
+            try await clipVideoWithFFmpeg(
+                ffmpegPath: ffmpegPath,
+                sourceURL: sourceURL,
+                outputURL: outputURL,
+                startTime: clampedStart,
+                duration: clipDuration,
+                progressHandler: progressHandler
+            )
+            return
+        }
+
+        do {
+            let composition = AVMutableComposition()
+            let startCM = CMTime(seconds: clampedStart, preferredTimescale: 600)
+            let durationCM = CMTime(seconds: clipDuration, preferredTimescale: 600)
+            let timeRange = CMTimeRange(start: startCM, duration: durationCM)
+
+            guard let sourceVideoTrack = nativeVideoTracks.first,
+                  let compVideoTrack = composition.addMutableTrack(
+                      withMediaType: .video,
+                      preferredTrackID: kCMPersistentTrackID_Invalid
+                  )
+            else {
+                throw VideoSubtitleBurnerError.noVideoTrack
+            }
+
+            try compVideoTrack.insertTimeRange(timeRange, of: sourceVideoTrack, at: .zero)
+            if let preferredTransform = try? await sourceVideoTrack.load(.preferredTransform) {
+                compVideoTrack.preferredTransform = preferredTransform
+            }
+
+            let nativeAudioTracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
+            if let sourceAudioTrack = nativeAudioTracks.first,
+               let compAudioTrack = composition.addMutableTrack(
+                   withMediaType: .audio,
+                   preferredTrackID: kCMPersistentTrackID_Invalid
+               ) {
+                try? compAudioTrack.insertTimeRange(timeRange, of: sourceAudioTrack, at: .zero)
+            }
+
+            guard let exportSession = AVAssetExportSession(
+                asset: composition,
+                presetName: AVAssetExportPresetHighestQuality
+            ) else {
+                throw VideoSubtitleBurnerError.exportSessionCreationFailed
+            }
+
+            exportSession.outputURL = outputURL
+            exportSession.outputFileType = .mp4
+            exportSession.shouldOptimizeForNetworkUse = true
+
+            let progressTask = Task {
+                while !Task.isCancelled {
+                    let currentProgress = Double(exportSession.progress)
+                    progressHandler(min(0.99, max(0.0, currentProgress)))
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+
+            await exportSession.export()
+            progressTask.cancel()
+
+            switch exportSession.status {
+            case .completed:
+                progressHandler(1.0)
+                return
+            case .cancelled:
+                throw VideoSubtitleBurnerError.exportCancelled
+            default:
+                let message = exportSession.error?.localizedDescription ?? "Unknown AVAssetExportSession error"
+                throw VideoSubtitleBurnerError.clipFailed(message)
+            }
+        } catch {
+            if let ffmpegPath = findExecutable(named: "ffmpeg") {
+                try? FileManager.default.removeItem(at: outputURL)
+                try await clipVideoWithFFmpeg(
+                    ffmpegPath: ffmpegPath,
+                    sourceURL: sourceURL,
+                    outputURL: outputURL,
+                    startTime: clampedStart,
+                    duration: clipDuration,
+                    progressHandler: progressHandler
+                )
+                return
+            }
+            throw error
+        }
+    }
+
+    private static func clipVideoWithFFmpeg(
+        ffmpegPath: String,
+        sourceURL: URL,
+        outputURL: URL,
+        startTime: TimeInterval,
+        duration: TimeInterval,
+        progressHandler: @escaping @Sendable (Double) -> Void
+    ) async throws {
+        try await Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: ffmpegPath)
+            process.arguments = [
+                "-nostdin",
+                "-loglevel", "error",
+                "-y",
+                "-ss", String(format: "%.3f", startTime),
+                "-i", sourceURL.path,
+                "-t", String(format: "%.3f", duration),
+                "-c:v", "h264_videotoolbox",
+                "-q:v", "65",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                "-progress", "pipe:1",
+                "-nostats",
+                outputURL.path
+            ]
+
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+
+            outPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
+                for line in chunk.components(separatedBy: .newlines) {
+                    if line.hasPrefix("out_time_us=") || line.hasPrefix("out_time_ms=") {
+                        let valStr = line.components(separatedBy: "=").last ?? ""
+                        if let micros = Double(valStr), duration > 0 {
+                            let fraction = min(0.99, max(0.0, (micros / 1_000_000.0) / duration))
+                            progressHandler(fraction)
+                        }
+                    }
+                }
+            }
+
+            try process.run()
+            process.waitUntilExit()
+            outPipe.fileHandleForReading.readabilityHandler = nil
+
+            if process.terminationStatus != 0 {
+                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                let errString = String(data: errData, encoding: .utf8) ?? "ffmpeg exited with code \(process.terminationStatus)"
+                throw VideoSubtitleBurnerError.clipFailed(errString)
             }
             progressHandler(1.0)
         }.value

@@ -23,19 +23,37 @@ struct WhisperSubMain {
     @MainActor
     private static func runCLIMode(args: [String]) async {
         guard let inputPath = args.first else {
-            fputs("Usage: WhisperSub --cli <input-video> [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
+            fputs("Usage: WhisperSub --cli <input-video> [--start <time>] [--end <time>] [--clip-out <clip.mp4>] [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
             exit(1)
         }
 
         let inputURL = URL(fileURLWithPath: inputPath)
         var srtOutURL = inputURL.deletingPathExtension().appendingPathExtension("srt")
         var burnOutURL: URL?
+        var clipOutURL: URL?
+        var clipStartArg: String?
+        var clipEndArg: String?
         var modelOption = WhisperModelOption.defaultModel
         var burnOnly = false
 
         var i = 1
         while i < args.count {
             switch args[i] {
+            case "--start":
+                if i + 1 < args.count {
+                    clipStartArg = args[i + 1]
+                    i += 1
+                }
+            case "--end":
+                if i + 1 < args.count {
+                    clipEndArg = args[i + 1]
+                    i += 1
+                }
+            case "--clip-out":
+                if i + 1 < args.count {
+                    clipOutURL = URL(fileURLWithPath: args[i + 1])
+                    i += 1
+                }
             case "--srt":
                 if i + 1 < args.count {
                     srtOutURL = URL(fileURLWithPath: args[i + 1])
@@ -67,6 +85,43 @@ struct WhisperSubMain {
             let meta = try await VideoSubtitleBurner.inspectVideo(url: inputURL)
             print("   Resolution: \(meta.formattedResolution), Duration: \(meta.formattedDuration)")
 
+            var activeVideoURL = inputURL
+            if clipStartArg != nil || clipEndArg != nil {
+                let startSec: TimeInterval
+                if let rawStart = clipStartArg {
+                    guard let parsed = SRTFormatter.parseFlexibleTimestamp(rawStart) else {
+                        throw VideoSubtitleBurnerError.invalidClipRange("Could not parse --start time \"\(rawStart)\".")
+                    }
+                    startSec = parsed
+                } else {
+                    startSec = 0.0
+                }
+
+                let endSec: TimeInterval
+                if let rawEnd = clipEndArg {
+                    guard let parsed = SRTFormatter.parseFlexibleTimestamp(rawEnd) else {
+                        throw VideoSubtitleBurnerError.invalidClipRange("Could not parse --end time \"\(rawEnd)\".")
+                    }
+                    endSec = min(parsed, meta.duration)
+                } else {
+                    endSec = meta.duration
+                }
+
+                let targetClipURL = clipOutURL
+                    ?? inputURL.deletingLastPathComponent().appendingPathComponent("\(inputURL.deletingPathExtension().lastPathComponent)_clipped.mp4")
+
+                print("✂️ Clipping video from \(SRTFormatter.formatShortTimestamp(startSec)) to \(SRTFormatter.formatShortTimestamp(endSec)) -> \(targetClipURL.path)")
+                try await VideoSubtitleBurner.clipVideo(
+                    sourceURL: inputURL,
+                    outputURL: targetClipURL,
+                    startTime: startSec,
+                    endTime: endSec
+                )
+                activeVideoURL = targetClipURL
+                let clippedMeta = try await VideoSubtitleBurner.inspectVideo(url: activeVideoURL)
+                print("✅ Clipped video duration: \(clippedMeta.formattedDuration)")
+            }
+
             let cues: [SubtitleCue]
             if burnOnly, FileManager.default.fileExists(atPath: srtOutURL.path) {
                 let raw = try String(contentsOf: srtOutURL, encoding: .utf8)
@@ -75,7 +130,7 @@ struct WhisperSubMain {
             } else {
                 let service = WhisperTranscriptionService()
                 print("🧠 Transcribing on Apple Neural Engine using \(modelOption.displayName) (\(modelOption.id))...")
-                cues = try await service.transcribeVideo(videoURL: inputURL, modelOption: modelOption)
+                cues = try await service.transcribeVideo(videoURL: activeVideoURL, modelOption: modelOption)
                 print("✅ Transcribed \(cues.count) subtitle segment(s).")
 
                 let srtContent = SRTFormatter.format(cues: cues)
@@ -86,7 +141,7 @@ struct WhisperSubMain {
             if let burnURL = burnOutURL {
                 print("🔥 Burning subtitles into video: \(burnURL.path)")
                 try await VideoSubtitleBurner.burnSubtitles(
-                    sourceURL: inputURL,
+                    sourceURL: activeVideoURL,
                     outputURL: burnURL,
                     cues: cues,
                     progressHandler: { _ in }
@@ -140,6 +195,12 @@ struct WhisperSubGUIApp: App {
                 .keyboardShortcut("i", modifiers: [.command, .shift])
 
                 Divider()
+
+                Button("Clip Video to Start–End Range") {
+                    viewModel.clipCurrentVideo()
+                }
+                .keyboardShortcut("k", modifiers: [.command])
+                .disabled(viewModel.videoURL == nil || viewModel.isBusy || !viewModel.hasUnappliedClipChanges)
 
                 Button("Transcribe Video") {
                     viewModel.transcribeCurrentVideo()

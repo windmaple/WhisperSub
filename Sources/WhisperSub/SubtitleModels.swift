@@ -165,6 +165,40 @@ public enum SRTFormatter {
         return hours * 3600.0 + minutes * 60.0 + seconds
     }
 
+    /// Parses flexible user-entered time strings (`HH:MM:SS[.mmm]`, `MM:SS[.mmm]`, or `SS[.mmm]`) into seconds.
+    public static func parseFlexibleTimestamp(_ raw: String) -> TimeInterval? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
+        let components = normalized.components(separatedBy: ":")
+
+        let result: TimeInterval
+        switch components.count {
+        case 1:
+            guard let seconds = Double(components[0]) else { return nil }
+            result = seconds
+        case 2:
+            guard let minutes = Double(components[0]),
+                  let seconds = Double(components[1]),
+                  minutes >= 0, seconds >= 0
+            else { return nil }
+            result = minutes * 60.0 + seconds
+        case 3:
+            guard let hours = Double(components[0]),
+                  let minutes = Double(components[1]),
+                  let seconds = Double(components[2]),
+                  hours >= 0, minutes >= 0, seconds >= 0
+            else { return nil }
+            result = hours * 3600.0 + minutes * 60.0 + seconds
+        default:
+            return nil
+        }
+
+        guard result.isFinite, result >= 0 else { return nil }
+        return result
+    }
+
     /// Cleans Whisper special tokens (such as `<|startoftranscript|>`, `<|0.00|>`, etc.) from segment text.
     public static func cleanWhisperText(_ raw: String) -> String {
         var result = raw

@@ -7,10 +7,19 @@ import UniformTypeIdentifiers
 @MainActor
 public final class AppViewModel: ObservableObject {
     @Published public var selectedModel: WhisperModelOption = WhisperModelOption.defaultModel
+    @Published public var originalVideoURL: URL?
+    @Published public var originalVideoMetadata: VideoMetadata?
     @Published public var videoURL: URL?
     @Published public var videoMetadata: VideoMetadata?
     @Published public var player: AVPlayer?
     @Published public var currentPlaybackTime: TimeInterval = 0
+
+    @Published public var clipStartText: String = "00:00.0"
+    @Published public var clipEndText: String = ""
+    @Published public var isClipping: Bool = false
+    @Published public var clipProgress: Double = 0.0
+    @Published public var appliedClipRange: (start: TimeInterval, end: TimeInterval)?
+    @Published public var lastClippedVideoURL: URL?
 
     @Published public var cues: [SubtitleCue] = []
     @Published public var srtText: String = ""
@@ -42,6 +51,14 @@ public final class AppViewModel: ObservableObject {
         return nil
     }
 
+    public var sourceVideoDuration: TimeInterval {
+        originalVideoMetadata?.duration ?? videoMetadata?.duration ?? 0
+    }
+
+    public var isClipped: Bool {
+        appliedClipRange != nil
+    }
+
     // MARK: - Video Selection
 
     public func openVideoPicker() {
@@ -64,7 +81,14 @@ public final class AppViewModel: ObservableObject {
         errorMessage = nil
         lastSavedSRTURL = nil
         lastBurnedVideoURL = nil
+        lastClippedVideoURL = nil
+        appliedClipRange = nil
+        originalVideoURL = url
+        originalVideoMetadata = nil
         videoURL = url
+        videoMetadata = nil
+        clipStartText = "00:00.0"
+        clipEndText = ""
         cues = []
         srtText = ""
         currentPlaybackTime = 0
@@ -92,7 +116,13 @@ public final class AppViewModel: ObservableObject {
         Task {
             do {
                 let metadata = try await VideoSubtitleBurner.inspectVideo(url: url)
-                self.videoMetadata = metadata
+                self.originalVideoMetadata = metadata
+                if self.appliedClipRange == nil {
+                    self.videoMetadata = metadata
+                    if self.clipEndText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.clipEndText = SRTFormatter.formatShortTimestamp(metadata.duration)
+                    }
+                }
             } catch {
                 self.errorMessage = error.localizedDescription
             }
@@ -129,30 +159,248 @@ public final class AppViewModel: ObservableObject {
         player?.pause()
     }
 
+    // MARK: - Video Clipping (Start / End Time)
+
+    /// Resolves the user-entered Start and End text fields into a `(start, end)` range in seconds, or returns `nil` if the full video is selected.
+    public func resolveClipRange() throws -> (start: TimeInterval, end: TimeInterval)? {
+        let startTrimmed = clipStartText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endTrimmed = clipEndText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let maxDur = sourceVideoDuration
+
+        let start: TimeInterval
+        if startTrimmed.isEmpty {
+            start = 0.0
+        } else if let parsedStart = SRTFormatter.parseFlexibleTimestamp(startTrimmed) {
+            start = parsedStart
+        } else {
+            throw VideoSubtitleBurnerError.invalidClipRange("Could not parse start time \"\(startTrimmed)\". Use MM:SS, HH:MM:SS, or seconds.")
+        }
+
+        if maxDur > 0 && start >= maxDur - 0.05 {
+            throw VideoSubtitleBurnerError.invalidClipRange("Start time (\(SRTFormatter.formatShortTimestamp(start))) must be less than video duration (\(SRTFormatter.formatShortTimestamp(maxDur))).")
+        }
+
+        let end: TimeInterval
+        if endTrimmed.isEmpty {
+            guard maxDur > 0 else { return nil }
+            end = maxDur
+        } else if let parsedEnd = SRTFormatter.parseFlexibleTimestamp(endTrimmed) {
+            end = maxDur > 0 ? min(parsedEnd, maxDur) : parsedEnd
+        } else {
+            throw VideoSubtitleBurnerError.invalidClipRange("Could not parse end time \"\(endTrimmed)\". Use MM:SS, HH:MM:SS, or seconds.")
+        }
+
+        guard end > start + 0.05 else {
+            throw VideoSubtitleBurnerError.invalidClipRange("End time (\(SRTFormatter.formatShortTimestamp(end))) must be greater than start time (\(SRTFormatter.formatShortTimestamp(start))).")
+        }
+
+        let isCustomStart = start > 0.05
+        let isCustomEnd = maxDur > 0 ? (end < maxDur - 0.15) : !endTrimmed.isEmpty
+        if !isCustomStart && !isCustomEnd {
+            return nil
+        }
+
+        return (start: start, end: end)
+    }
+
+    public var hasCustomClipRange: Bool {
+        ((try? resolveClipRange()) ?? nil) != nil
+    }
+
+    public var hasUnappliedClipChanges: Bool {
+        do {
+            if let requested = try resolveClipRange() {
+                if let applied = appliedClipRange {
+                    return abs(requested.start - applied.start) > 0.05 || abs(requested.end - applied.end) > 0.05
+                }
+                return true
+            } else {
+                return appliedClipRange != nil
+            }
+        } catch {
+            return true
+        }
+    }
+
+    public func setClipStartToPlayhead() {
+        let baseOffset = appliedClipRange?.start ?? 0
+        let timeInSource = max(0, baseOffset + currentPlaybackTime)
+        clipStartText = SRTFormatter.formatShortTimestamp(timeInSource)
+    }
+
+    public func setClipEndToPlayhead() {
+        let baseOffset = appliedClipRange?.start ?? 0
+        let timeInSource = max(0, baseOffset + currentPlaybackTime)
+        clipEndText = SRTFormatter.formatShortTimestamp(timeInSource)
+    }
+
+    public func resetClipRange() {
+        guard let origURL = originalVideoURL, !isBusy else { return }
+        cleanupTimeObserver()
+        errorMessage = nil
+        appliedClipRange = nil
+        lastClippedVideoURL = nil
+        videoURL = origURL
+        videoMetadata = originalVideoMetadata
+        clipStartText = "00:00.0"
+        if let dur = originalVideoMetadata?.duration {
+            clipEndText = SRTFormatter.formatShortTimestamp(dur)
+        } else {
+            clipEndText = ""
+        }
+        cues = []
+        srtText = ""
+        lastSavedSRTURL = nil
+        lastBurnedVideoURL = nil
+        currentPlaybackTime = 0
+
+        let newPlayer = AVPlayer(url: origURL)
+        self.player = newPlayer
+        setupTimeObserver(for: newPlayer)
+        statusMessage = "Reset to full video \"\(origURL.lastPathComponent)\"."
+    }
+
+    public func clipCurrentVideo() {
+        guard originalVideoURL != nil || videoURL != nil, !isBusy else { return }
+        isBusy = true
+        errorMessage = nil
+
+        Task {
+            defer {
+                isBusy = false
+                isClipping = false
+            }
+            do {
+                let clippedURL = try await performClipIfNeeded(forceIfCustom: true)
+                if let range = appliedClipRange, let meta = videoMetadata {
+                    statusMessage = "Clipped video to \(SRTFormatter.formatShortTimestamp(range.start)) – \(SRTFormatter.formatShortTimestamp(range.end)) (\(meta.formattedDuration)) → \(clippedURL.lastPathComponent)."
+                } else {
+                    statusMessage = "Full video range active (\(clippedURL.lastPathComponent))."
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                statusMessage = "Failed to clip video."
+            }
+        }
+    }
+
+    private func clippedOutputURL(for sourceURL: URL) -> URL {
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+        let fileName = baseName.hasSuffix("_clipped") ? "\(baseName)_trim.mp4" : "\(baseName)_clipped.mp4"
+        let parentDir = sourceURL.deletingLastPathComponent()
+        if FileManager.default.isWritableFile(atPath: parentDir.path) {
+            let candidate = parentDir.appendingPathComponent(fileName)
+            if candidate != sourceURL {
+                return candidate
+            }
+        }
+        return FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+    }
+
+    /// Clips the original video if a custom start/end time range is specified and not yet applied.
+    private func performClipIfNeeded(forceIfCustom: Bool = false) async throws -> URL {
+        guard let sourceURL = originalVideoURL ?? videoURL else {
+            throw VideoSubtitleBurnerError.noVideoTrack
+        }
+
+        let requestedRange = try resolveClipRange()
+
+        guard let range = requestedRange else {
+            if appliedClipRange != nil {
+                cleanupTimeObserver()
+                appliedClipRange = nil
+                lastClippedVideoURL = nil
+                videoURL = sourceURL
+                videoMetadata = originalVideoMetadata
+                cues = []
+                srtText = ""
+                lastSavedSRTURL = nil
+                lastBurnedVideoURL = nil
+                currentPlaybackTime = 0
+                let newPlayer = AVPlayer(url: sourceURL)
+                self.player = newPlayer
+                setupTimeObserver(for: newPlayer)
+            }
+            return videoURL ?? sourceURL
+        }
+
+        if !forceIfCustom,
+           let applied = appliedClipRange,
+           let currentURL = videoURL,
+           abs(range.start - applied.start) <= 0.05,
+           abs(range.end - applied.end) <= 0.05,
+           FileManager.default.fileExists(atPath: currentURL.path) {
+            return currentURL
+        }
+
+        let outURL = clippedOutputURL(for: sourceURL)
+        isClipping = true
+        clipProgress = 0.0
+        statusMessage = "Clipping video from \(SRTFormatter.formatShortTimestamp(range.start)) to \(SRTFormatter.formatShortTimestamp(range.end))…"
+
+        try await VideoSubtitleBurner.clipVideo(
+            sourceURL: sourceURL,
+            outputURL: outURL,
+            startTime: range.start,
+            endTime: range.end,
+            progressHandler: { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    self?.clipProgress = progress
+                }
+            }
+        )
+
+        let clippedMeta = try await VideoSubtitleBurner.inspectVideo(url: outURL)
+
+        cleanupTimeObserver()
+        self.videoURL = outURL
+        self.videoMetadata = clippedMeta
+        self.lastClippedVideoURL = outURL
+        self.appliedClipRange = range
+        self.cues = []
+        self.srtText = ""
+        self.lastSavedSRTURL = nil
+        self.lastBurnedVideoURL = nil
+        self.currentPlaybackTime = 0
+
+        let newPlayer = AVPlayer(url: outURL)
+        self.player = newPlayer
+        setupTimeObserver(for: newPlayer)
+
+        isClipping = false
+        clipProgress = 1.0
+        return outURL
+    }
+
     // MARK: - Transcription
 
     public func transcribeCurrentVideo() {
-        guard let videoURL, !isBusy else { return }
+        guard videoURL != nil, !isBusy else { return }
         isBusy = true
         errorMessage = nil
         lastSavedSRTURL = nil
         lastBurnedVideoURL = nil
 
         let model = selectedModel
-        statusMessage = "Preparing \(model.displayName) on Apple Neural Engine…"
 
         Task {
-            defer { isBusy = false }
+            defer {
+                isBusy = false
+                isClipping = false
+            }
             do {
+                let targetVideoURL = try await performClipIfNeeded()
+                statusMessage = "Preparing \(model.displayName) on Apple Neural Engine…"
+
                 let generatedCues = try await transcriptionService.transcribeVideo(
-                    videoURL: videoURL,
+                    videoURL: targetVideoURL,
                     modelOption: model
                 )
                 self.cues = generatedCues
                 self.srtText = SRTFormatter.format(cues: generatedCues)
 
                 // Auto-write a companion .srt next to the video if writable, or inform the user
-                let defaultSRTURL = videoURL.deletingPathExtension().appendingPathExtension("srt")
+                let defaultSRTURL = targetVideoURL.deletingPathExtension().appendingPathExtension("srt")
                 if (try? self.srtText.write(to: defaultSRTURL, atomically: true, encoding: .utf8)) != nil {
                     self.lastSavedSRTURL = defaultSRTURL
                     self.statusMessage = "Transcribed \(generatedCues.count) subtitle segments and saved \(defaultSRTURL.lastPathComponent)."

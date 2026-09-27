@@ -109,13 +109,15 @@ public struct ContentView: View {
     // MARK: - Left Pane: Video Drop Zone, Player & Actions
 
     private var leftVideoWorkspace: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             if let _ = viewModel.videoURL, let player = viewModel.player {
                 videoPlayerCard(player: player)
                 videoMetadataBar
             } else {
                 videoDropZone
             }
+
+            videoClipBar
 
             workflowActionBar
 
@@ -262,6 +264,100 @@ public struct ContentView: View {
         )
     }
 
+    // MARK: - Video Clip / Trim Bar
+
+    private var videoClipBar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 5) {
+                Image(systemName: "scissors")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(viewModel.isClipped || viewModel.hasCustomClipRange ? Color.accentColor : .secondary)
+                Text("Clip Video:")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+
+            HStack(spacing: 5) {
+                Text("Start")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                TextField("00:00.0", text: $viewModel.clipStartText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 72)
+                    .disabled(viewModel.videoURL == nil || viewModel.isBusy)
+
+                Button {
+                    viewModel.setClipStartToPlayhead()
+                } label: {
+                    Image(systemName: "arrow.down.to.line")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .controlSize(.small)
+                .help("Set Start time to current playhead")
+                .disabled(viewModel.videoURL == nil || viewModel.isBusy)
+            }
+
+            HStack(spacing: 5) {
+                Text("End")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                TextField(viewModel.originalVideoMetadata?.formattedDuration ?? "End", text: $viewModel.clipEndText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 72)
+                    .disabled(viewModel.videoURL == nil || viewModel.isBusy)
+
+                Button {
+                    viewModel.setClipEndToPlayhead()
+                } label: {
+                    Image(systemName: "arrow.up.to.line")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .controlSize(.small)
+                .help("Set End time to current playhead")
+                .disabled(viewModel.videoURL == nil || viewModel.isBusy)
+            }
+
+            if let range = viewModel.appliedClipRange, !viewModel.hasUnappliedClipChanges {
+                Text("Clipped (\(SRTFormatter.formatShortTimestamp(range.end - range.start)))")
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.accentColor.opacity(0.15))
+                    .foregroundStyle(Color.accentColor)
+                    .clipShape(Capsule())
+            }
+
+            Spacer()
+
+            Button {
+                viewModel.clipCurrentVideo()
+            } label: {
+                Label("Clip Video", systemImage: "scissors")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .controlSize(.small)
+            .buttonStyle(.bordered)
+            .disabled(viewModel.videoURL == nil || viewModel.isBusy || !viewModel.hasUnappliedClipChanges)
+            .help("Clip the video to Start–End time now (also happens automatically before transcription)")
+
+            if viewModel.isClipped || viewModel.hasCustomClipRange {
+                Button("Reset") {
+                    viewModel.resetClipRange()
+                }
+                .controlSize(.small)
+                .disabled(viewModel.isBusy)
+                .help("Reset to the full original video")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(NSColor.controlBackgroundColor))
+        )
+    }
+
     // MARK: - Workflow Action Bar
 
     private var workflowActionBar: some View {
@@ -269,10 +365,15 @@ public struct ContentView: View {
             Button {
                 viewModel.transcribeCurrentVideo()
             } label: {
-                Label("1. Transcribe Video", systemImage: "waveform.badge.mic")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
+                Label(
+                    viewModel.hasUnappliedClipChanges && viewModel.hasCustomClipRange
+                        ? "1. Clip & Transcribe"
+                        : "1. Transcribe Video",
+                    systemImage: "waveform.badge.mic"
+                )
+                .font(.system(size: 13, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -316,6 +417,16 @@ public struct ContentView: View {
                     .lineLimit(2)
                 Spacer()
 
+                if let clippedURL = viewModel.lastClippedVideoURL {
+                    Button {
+                        viewModel.revealInFinder(clippedURL)
+                    } label: {
+                        Label("Reveal Clip", systemImage: "scissors")
+                            .font(.system(size: 11))
+                    }
+                    .controlSize(.small)
+                }
+
                 if let srtURL = viewModel.lastSavedSRTURL {
                     Button {
                         viewModel.revealInFinder(srtURL)
@@ -334,6 +445,23 @@ public struct ContentView: View {
                             .font(.system(size: 11))
                     }
                     .controlSize(.small)
+                }
+            }
+
+            if viewModel.isClipping {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Clipping video to selected time range…")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(Int((viewModel.clipProgress * 100).rounded()))%")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: viewModel.clipProgress, total: 1.0)
+                        .progressViewStyle(.linear)
+                        .tint(.accentColor)
                 }
             }
 
@@ -383,7 +511,7 @@ public struct ContentView: View {
                         .truncationMode(.head)
                 }
 
-            case .completed(let count, let speed) where !viewModel.isBurning:
+            case .completed(let count, let speed) where !viewModel.isBurning && !viewModel.isClipping:
                 if speed > 0 {
                     Text("Neural Engine decoded \(count) segments at \(String(format: "%.1f×", speed)) real-time speed.")
                         .font(.system(size: 11))
