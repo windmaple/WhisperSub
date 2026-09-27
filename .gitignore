@@ -1,0 +1,14 @@
+.DS_Store
+/.build/
+/Packages/
+xcuserdata/
+DerivedData/
+.swiftpm/
+WhisperSub.app/
+*.xcodeproj
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.wav
+*.srt
