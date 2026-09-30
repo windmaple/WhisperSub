@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhisperSub — AI Video Subtitles on Apple Neural Engine for macOS</title>
+  <meta name="description" content="WhisperSub is a native macOS 14+ app that transcribes video using OpenAI Whisper on the Apple Neural Engine via WhisperKit CoreML, exports standard .SRT files, and burns styled captions into MP4 video." />
+  <meta property="og:title" content="WhisperSub — AI Video Subtitles on Apple Neural Engine" />
+  <meta property="og:description" content="Native SwiftUI macOS app & CLI that transcribes videos locally on the Apple Neural Engine, generates .SRT subtitle files, and burns captions directly into MP4." />
+  <meta property="og:image" content="assets/screenshot-workspace.png" />
+  <meta property="og:type" content="website" />
+  <link rel="icon" type="image/png" href="assets/icon.png" />
+
+  <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="index.css" />
+</head>
+<body>
+  <!-- Sticky Navigation Header -->
+  <header class="site-header" id="site-header">
+    <div class="container nav-bar">
+      <a href="#top" class="brand-link" id="nav-brand-link">
+        <img src="assets/icon.png" alt="WhisperSub App Icon" class="brand-icon" width="36" height="36" />
+        <span>WhisperSub</span>
+        <span class="brand-tag">macOS 14+ • ANE</span>
+      </a>
+
+      <nav aria-label="Primary Navigation">
+        <ul class="nav-links">
+          <li><a href="#showcase" id="nav-link-showcase">Screenshots</a></li>
+          <li><a href="#workbench" id="nav-link-workbench">Interactive Demo</a></li>
+          <li><a href="#pipeline" id="nav-link-pipeline">Workflow</a></li>
+          <li><a href="#models" id="nav-link-models">CoreML Models</a></li>
+          <li><a href="#cli" id="nav-link-cli">CLI Builder</a></li>
+          <li><a href="#build" id="nav-link-build">Build &amp; Shortcuts</a></li>
+        </ul>
+      </nav>
+
+      <div class="nav-actions">
+        <a href="https://github.com/windmaple/WhisperSub" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm" id="nav-btn-github">
+          GitHub
+        </a>
+        <a href="downloads/WhisperSub-macOS-arm64.zip" download="WhisperSub-macOS-arm64.zip" class="btn btn-primary btn-sm" id="nav-btn-download">
+          ⬇ Download for macOS
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+    <!-- Hero Section -->
+    <section class="hero">
+      <div class="container">
+        <div class="hero-top">
+          <div class="hero-copy">
+            <div class="hero-identity">
+              <img src="assets/icon.png" alt="WhisperSub macOS App Icon" class="hero-app-icon" width="68" height="68" />
+              <div class="hero-meta-stack">
+                <span class="hero-kicker">Apple Neural Engine • WhisperKit CoreML</span>
+                <span class="hero-reqs">Native Swift 6 &amp; SwiftUI • macOS Sonoma 14.0+ • 100% On-Device</span>
+              </div>
+            </div>
+
+            <h1>AI Video Subtitles on the Apple Neural Engine.</h1>
+
+            <p class="hero-subtitle">
+              WhisperSub is a native macOS application and headless CLI that transcribes videos locally using OpenAI Whisper on Apple Silicon, formats clean <code>.srt</code> subtitle cues, and burns crisp captions directly into <code>.mp4</code> video via hardware-accelerated <code>AVFoundation</code> and <code>CoreImage</code>.
+            </p>
+
+            <div class="hero-cta-row">
+              <a href="downloads/WhisperSub-macOS-arm64.zip" download="WhisperSub-macOS-arm64.zip" class="btn btn-primary btn-lg" id="hero-cta-download">
+                ⬇ Download for macOS (Apple Silicon • 3.5 MB)
+              </a>
+              <a href="https://github.com/windmaple/WhisperSub" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-lg" id="hero-cta-github">
+                View on GitHub
+              </a>
+              <a href="#workbench" class="btn btn-secondary btn-lg" id="hero-cta-workbench">
+                Interactive Demo
+              </a>
+            </div>
+          </div>
+
+          <!-- Hardware & Architecture Spec Summary -->
+          <aside class="hero-spec-panel" aria-label="Technical Specifications">
+            <div class="spec-panel-title">
+              <span>Runtime Architecture</span>
+              <span class="spec-status-tag">14.8× Real-Time</span>
+            </div>
+            <div class="spec-list">
+              <div class="spec-row">
+                <span class="spec-label">Audio Encoder &amp; Decoder</span>
+                <span class="spec-value">.cpuAndNeuralEngine</span>
+              </div>
+              <div class="spec-row">
+                <span class="spec-label">Mel Spectrogram Compute</span>
+                <span class="spec-value">.cpuAndGPU</span>
+              </div>
+              <div class="spec-row">
+                <span class="spec-label">Video Subtitle Compositor</span>
+                <span class="spec-value">AVFoundation + CoreImage</span>
+              </div>
+              <div class="spec-row">
+                <span class="spec-label">Supported Input Containers</span>
+                <span class="spec-value">.mp4 .mov .m4v .avi .webm .mkv</span>
+              </div>
+              <div class="spec-row">
+                <span class="spec-label">Local Model Cache</span>
+                <span class="spec-value">~/Library/Application Support/WhisperSub</span>
+              </div>
+              <div class="spec-row">
+                <span class="spec-label">Caption Readability Split</span>
+                <span class="spec-value">≤ 88 chars • VAD Chunking</span>
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        <!-- Real Application Screenshots Showcase -->
+        <div class="showcase-frame" id="showcase">
+          <div class="showcase-toolbar">
+            <div class="segmented-control" role="tablist" aria-label="Screenshot View Switcher">
+              <button type="button" class="segment-btn active" id="btn-show-workspace" role="tab" aria-selected="true" data-target="workspace">
+                1. Main Workspace &amp; Subtitle Cues
+              </button>
+              <button type="button" class="segment-btn" id="btn-show-burning" role="tab" aria-selected="false" data-target="burning">
+                2. Raw .SRT Inspector &amp; Hardware Burn
+              </button>
+            </div>
+            <div class="showcase-caption-bar" id="showcase-caption-text">
+              <span>Synchronized video preview, start/end range clipping, and interactive cue list on macOS.</span>
+            </div>
+          </div>
+
+          <div class="showcase-stage">
+            <img
+              src="assets/screenshot-workspace.png"
+              alt="WhisperSub Main Workspace & Subtitle Cues on macOS"
+              class="showcase-img"
+              id="img-showcase-workspace"
+              width="1960"
+              height="1320"
+            />
+            <img
+              src="assets/screenshot-burning.png"
+              alt="WhisperSub Raw SRT Inspector & Hardware-Accelerated Subtitle Burning"
+              class="showcase-img hidden"
+              id="img-showcase-burning"
+              width="1960"
+              height="1320"
+            />
+          </div>
+
+          <div class="showcase-annotations">
+            <div class="annotation-item">
+              <div class="annotation-step">01 • MODEL &amp; CLIPPING</div>
+              <div class="annotation-title">In-App Model Picker &amp; Range Trim</div>
+              <p class="annotation-text">Select from Tiny, Base, Small, or Large v3 Turbo and clip any <code>Start</code> to <code>End</code> timestamp before transcribing.</p>
+            </div>
+            <div class="annotation-item">
+              <div class="annotation-step">02 • DUAL INSPECTOR</div>
+              <div class="annotation-title">Subtitle Cues &amp; Raw .SRT View</div>
+              <p class="annotation-text">Inspect timed segments with millisecond accuracy (<code>HH:MM:SS,mmm --&gt; HH:MM:SS,mmm</code>), import existing <code>.srt</code> files, or copy with one click.</p>
+            </div>
+            <div class="annotation-item">
+              <div class="annotation-step">03 • HARDWARE COMPOSITOR</div>
+              <div class="annotation-title">Direct MP4 Subtitle Burning</div>
+              <p class="annotation-text">Render anti-aliased captions directly into the video track using native <code>AVFoundation</code> &amp; <code>CoreImage</code> pipelines.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Interactive Live Subtitle & .SRT Workbench Section -->
+    <section class="section" id="workbench">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-eyebrow">Interactive Preview</span>
+          <h2 class="section-title">Test the Subtitle Cue &amp; .SRT Inspector</h2>
+          <p class="section-desc">
+            Click any transcribed cue below to jump the playhead and preview the burned caption overlay, or switch to the <strong>Raw .SRT</strong> tab to edit timestamps and export a standard <code>.srt</code> file right from your browser.
+          </p>
+        </div>
+
+        <div class="workbench-shell">
+          <div class="macos-titlebar">
+            <div class="window-dots" aria-hidden="true">
+              <span class="window-dot dot-close"></span>
+              <span class="window-dot dot-min"></span>
+              <span class="window-dot dot-max"></span>
+            </div>
+            <div class="window-title">WhisperSub — Interactive Studio Preview (keynote_demo.mp4)</div>
+            <div class="window-badge">Apple Neural Engine • 14.8×</div>
+          </div>
+
+          <div class="workbench-grid">
+            <!-- Left Column: Simulated Player & Action Controls -->
+            <div class="workbench-left">
+              <div class="video-stage" id="demo-video-stage">
+                <div class="video-stage-center">
+                  <div class="waveform-ring" id="demo-waveform-indicator">||I||</div>
+                  <div class="video-stage-label">Keynote: On-Device AI &amp; Neural Engine</div>
+                </div>
+
+                <div class="burned-subtitle-box" id="demo-caption-overlay">
+                  Welcome to our deep dive into Apple Neural Engine acceleration.
+                </div>
+
+                <div class="scrubber-bar">
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-demo-cycle" title="Step to next subtitle cue">
+                    Next Cue ▸
+                  </button>
+                  <span id="demo-timecode-current">00:05.2</span>
+                  <div class="scrubber-track" id="demo-scrubber-track" title="Click to scrub timeline">
+                    <div class="scrubber-fill" id="demo-scrubber-fill"></div>
+                  </div>
+                  <span>01:15.0</span>
+                </div>
+              </div>
+
+              <div class="workbench-controls-bar">
+                <div>
+                  <span class="file-pill">🎬 keynote_demo.mp4</span>
+                  <span class="file-meta">• 1920×1080 • 01:15 • 18.4 MB</span>
+                </div>
+                <div>
+                  <span class="file-meta">Clip Range: <strong>00:10.0 → 01:25.0</strong></span>
+                </div>
+              </div>
+
+              <div class="workbench-action-buttons">
+                <button type="button" class="btn btn-primary" id="btn-demo-transcribe">
+                  1. Simulate Transcribe
+                </button>
+                <button type="button" class="btn btn-secondary" id="btn-demo-download-srt">
+                  2. Download .SRT
+                </button>
+                <button type="button" class="btn btn-amber" id="btn-demo-burn">
+                  3. Simulate Burn MP4
+                </button>
+              </div>
+
+              <div class="workbench-status" id="demo-status-bar">
+                <span id="demo-status-text">✅ Transcription complete! Generated 5 demo subtitle cues at 14.8× real-time speed.</span>
+              </div>
+            </div>
+
+            <!-- Right Column: Subtitle Cues / Raw .SRT Inspector -->
+            <div class="workbench-right">
+              <div class="inspector-header">
+                <div class="segmented-control" role="tablist" aria-label="Inspector Mode">
+                  <button type="button" class="segment-btn active" id="tab-btn-cues" role="tab" aria-selected="true">
+                    Subtitle Cues
+                  </button>
+                  <button type="button" class="segment-btn" id="tab-btn-raw" role="tab" aria-selected="false">
+                    Raw .SRT
+                  </button>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-srt">
+                  Copy .SRT
+                </button>
+              </div>
+
+              <div class="cue-list" id="demo-cue-list" role="region" aria-label="Subtitle Cues List">
+                <!-- Populated dynamically by app.js -->
+              </div>
+
+              <div class="raw-srt-pane" id="demo-raw-pane" role="region" aria-label="Raw SRT Editor">
+                <textarea
+                  id="demo-raw-textarea"
+                  class="raw-srt-textarea"
+                  spellcheck="false"
+                  aria-label="Raw SRT Content"
+                ></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4-Step Workflow Pipeline Section -->
+    <section class="section" id="pipeline">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-eyebrow">End-to-End Pipeline</span>
+          <h2 class="section-title">Four Steps from Raw Footage to Subtitled MP4</h2>
+          <p class="section-desc">
+            Every stage runs natively on your Mac without uploading confidential video or audio to external servers.
+          </p>
+        </div>
+
+        <div class="pipeline-steps">
+          <article class="pipeline-step">
+            <div>
+              <div class="step-num-row">
+                <span class="step-number">STEP 01</span>
+                <span class="step-shortcut">⌘O</span>
+              </div>
+              <h3 class="step-heading">Drop &amp; Inspect Video</h3>
+              <p class="step-body">
+                Drag and drop <code>.mp4</code>, <code>.mov</code>, <code>.m4v</code>, <code>.avi</code>, <code>.webm</code>, or <code>.mkv</code> files. WhisperSub inspects resolution, frame rate, and duration while initializing live synchronized caption playback.
+              </p>
+            </div>
+            <div class="step-tech-tag">AVAsset • AVPlayerView</div>
+          </article>
+
+          <article class="pipeline-step">
+            <div>
+              <div class="step-num-row">
+                <span class="step-number">STEP 02</span>
+                <span class="step-shortcut">⌘K</span>
+              </div>
+              <h3 class="step-heading">Optional Video Clipping</h3>
+              <p class="step-body">
+                Set flexible start and end timestamps (<code>HH:MM:SS.mmm</code>, <code>MM:SS</code>, or directly from the current playhead) to trim the video before transcription so zero compute is wasted.
+              </p>
+            </div>
+            <div class="step-tech-tag">AVAssetExportSession • Fast Trim</div>
+          </article>
+
+          <article class="pipeline-step">
+            <div>
+              <div class="step-num-row">
+                <span class="step-number">STEP 03</span>
+                <span class="step-shortcut">⌘T / ⌘S</span>
+              </div>
+              <h3 class="step-heading">Transcribe &amp; Save .SRT</h3>
+              <p class="step-body">
+                Extracts 16 kHz mono WAV audio, auto-detects spoken language, strips Whisper special tokens, splits long captions at 88 characters, and formats standard <code>.srt</code> cues.
+              </p>
+            </div>
+            <div class="step-tech-tag">WhisperKit CoreML • VAD Chunking</div>
+          </article>
+
+          <article class="pipeline-step">
+            <div>
+              <div class="step-num-row">
+                <span class="step-number">STEP 04</span>
+                <span class="step-shortcut">⌘B</span>
+              </div>
+              <h3 class="step-heading">Burn .SRT into Video</h3>
+              <p class="step-body">
+                Composites high-contrast, rounded subtitle overlays frame-by-frame onto the video track with real-time progress reporting and one-click Finder reveal.
+              </p>
+            </div>
+            <div class="step-tech-tag">AVVideoComposition • CoreImage</div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- CoreML Models & Compute Estimator Section -->
+    <section class="section" id="models">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-eyebrow">WhisperKit CoreML Variants</span>
+          <h2 class="section-title">In-App Model Selector &amp; Neural Engine Dispatch</h2>
+          <p class="section-desc">
+            Models and tokenizers are downloaded on demand from <code>argmaxinc/whisperkit-coreml</code> and cached locally in <code>~/Library/Application Support/WhisperSub</code> for offline use.
+          </p>
+        </div>
+
+        <div class="models-layout">
+          <div class="model-selector-list" role="listbox" aria-label="Whisper Model Variants">
+            <button type="button" class="model-option-btn" id="model-btn-tiny" data-model="tiny">
+              <div>
+                <div class="model-name">Whisper Tiny</div>
+                <div class="model-id-code">openai_whisper-tiny • ~75 MB</div>
+              </div>
+              <span class="model-badge">Fastest</span>
+            </button>
+
+            <button type="button" class="model-option-btn active" id="model-btn-base" data-model="base">
+              <div>
+                <div class="model-name">Whisper Base</div>
+                <div class="model-id-code">openai_whisper-base • ~145 MB</div>
+              </div>
+              <span class="model-badge">Default</span>
+            </button>
+
+            <button type="button" class="model-option-btn" id="model-btn-small" data-model="small">
+              <div>
+                <div class="model-name">Whisper Small</div>
+                <div class="model-id-code">openai_whisper-small • ~485 MB</div>
+              </div>
+              <span class="model-badge">Accurate</span>
+            </button>
+
+            <button type="button" class="model-option-btn" id="model-btn-large" data-model="large">
+              <div>
+                <div class="model-name">Whisper Large v3 Turbo</div>
+                <div class="model-id-code">openai_whisper-large-v3_turbo • ~950 MB</div>
+              </div>
+              <span class="model-badge">Best</span>
+            </button>
+          </div>
+
+          <div class="model-detail-panel" id="model-detail-panel">
+            <div class="model-detail-header">
+              <h3 class="model-detail-title" id="selected-model-title">Whisper Base (Default)</h3>
+              <div class="model-detail-sub" id="selected-model-id">Variant ID: openai_whisper-base • ~145 MB on disk</div>
+            </div>
+
+            <div class="estimator-box">
+              <div class="estimator-top">
+                <label for="video-duration-slider">Source Video Length</label>
+                <span id="slider-duration-label">10 minutes</span>
+              </div>
+              <input
+                type="range"
+                id="video-duration-slider"
+                class="duration-slider"
+                min="1"
+                max="60"
+                value="10"
+              />
+              <div class="estimator-result">
+                <span>Estimated Neural Engine Transcription Time:</span>
+                <span class="estimator-time" id="estimated-transcribe-time">~41 sec (14.8×)</span>
+              </div>
+            </div>
+
+            <table class="compute-table" aria-label="CoreML Compute Unit Mapping">
+              <thead>
+                <tr>
+                  <th>CoreML Pipeline Stage</th>
+                  <th>Compiled Artifact</th>
+                  <th>Compute Unit</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Mel Spectrogram Extraction</td>
+                  <td><code>MelSpectrogram.mlmodelc</code></td>
+                  <td>.cpuAndGPU</td>
+                </tr>
+                <tr>
+                  <td>Acoustic Feature Encoder</td>
+                  <td><code>AudioEncoder.mlmodelc</code></td>
+                  <td>.cpuAndNeuralEngine</td>
+                </tr>
+                <tr>
+                  <td>Autoregressive Token Decoder</td>
+                  <td><code>TextDecoder.mlmodelc</code></td>
+                  <td>.cpuAndNeuralEngine</td>
+                </tr>
+                <tr>
+                  <td>Decoder KV Prefill Cache</td>
+                  <td><code>Prefill Prompt/Cache</code></td>
+                  <td>.cpuOnly</td>
+                </tr>
+                <tr>
+                  <td>Recommended Use Case</td>
+                  <td colspan="2" id="selected-model-usecase">Everyday lectures, demos, and rapid .SRT generation</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Interactive CLI Command Builder Section -->
+    <section class="section" id="cli">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-eyebrow">Headless Automation</span>
+          <h2 class="section-title">Interactive CLI Command Builder</h2>
+          <p class="section-desc">
+            Run batch video clipping, Neural Engine transcription, and subtitle burning directly from shell scripts or CI pipelines using <code>--cli</code> mode.
+          </p>
+        </div>
+
+        <div class="cli-builder">
+          <div class="cli-controls">
+            <div class="form-group">
+              <label class="form-label" for="cli-input-video">Input Video Path</label>
+              <input type="text" id="cli-input-video" class="form-input" value="input.mp4" />
+            </div>
+
+            <div class="form-row-2">
+              <div class="form-group">
+                <label class="form-label" for="cli-start-time">Start Clip (<code>--start</code>)</label>
+                <input type="text" id="cli-start-time" class="form-input" value="00:10" placeholder="e.g. 00:10" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cli-end-time">End Clip (<code>--end</code>)</label>
+                <input type="text" id="cli-end-time" class="form-input" value="00:45" placeholder="e.g. 00:45" />
+              </div>
+            </div>
+
+            <div class="form-row-2">
+              <div class="form-group">
+                <label class="form-label" for="cli-srt-out">SRT Output (<code>--srt</code>)</label>
+                <input type="text" id="cli-srt-out" class="form-input" value="output.srt" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cli-burn-out">Burned Video (<code>--burn</code>)</label>
+                <input type="text" id="cli-burn-out" class="form-input" value="output_subtitled.mp4" />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="cli-model-select">Whisper Model (<code>--model</code>)</label>
+              <select id="cli-model-select" class="form-select">
+                <option value="">Default (openai_whisper-base)</option>
+                <option value="openai_whisper-tiny">openai_whisper-tiny (~75 MB)</option>
+                <option value="openai_whisper-small">openai_whisper-small (~485 MB)</option>
+                <option value="openai_whisper-large-v3_turbo">openai_whisper-large-v3_turbo (~950 MB)</option>
+              </select>
+            </div>
+
+            <div class="checkbox-row">
+              <label class="checkbox-label">
+                <input type="checkbox" id="cli-enable-clip" checked />
+                Include <code>--start</code> / <code>--end</code> clipping
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="cli-enable-burn" checked />
+                Burn subtitles into MP4 (<code>--burn</code>)
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="cli-burn-only" />
+                Reuse existing SRT (<code>--burn-only</code>)
+              </label>
+            </div>
+          </div>
+
+          <div class="terminal-card">
+            <div>
+              <div class="terminal-top">
+                <span class="terminal-title">zsh — WhisperSub Headless CLI</span>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-cli">
+                  Copy Command
+                </button>
+              </div>
+              <div class="terminal-cmd-box" id="cli-command-output">
+                ./WhisperSub.app/Contents/MacOS/WhisperSub --cli input.mp4 --start 00:10 --end 00:45 --srt output.srt --burn output_subtitled.mp4
+              </div>
+            </div>
+
+            <div class="terminal-log" id="cli-terminal-log">
+              <div>🎬 Inspecting video: input.mp4</div>
+              <div>&nbsp;&nbsp;&nbsp;Resolution: 1920×1080, Duration: 01:15.0</div>
+              <div>✂️ Clipping video from 00:10.0 to 00:45.0 -&gt; input_clipped.mp4</div>
+              <div>🧠 Transcribing on Apple Neural Engine using Whisper Base (openai_whisper-base)...</div>
+              <div>✅ Transcribed 18 subtitle segment(s).</div>
+              <div>📝 Saved .SRT file to: output.srt</div>
+              <div>🔥 Burning subtitles into video: output_subtitled.mp4</div>
+              <div>✅ Exported burned video to: output_subtitled.mp4</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Download Binary, Build from Source & Keyboard Shortcuts Section -->
+    <section class="section" id="build">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-eyebrow">Download &amp; Quick Start</span>
+          <h2 class="section-title">Pre-Built Binary, Source Build &amp; Shortcuts</h2>
+          <p class="section-desc">
+            Download the pre-built Apple Silicon <code>WhisperSub.app</code> bundle directly, or compile from source with a single script using Swift Package Manager.
+          </p>
+        </div>
+
+        <div class="build-grid">
+          <div class="code-panel">
+            <h3>Pre-Built macOS Binary (arm64) &amp; Source Build</h3>
+            <p>Download <code>WhisperSub-macOS-arm64.zip</code> (3.5 MB, macOS 14.0+ Apple Silicon), or build from source via <code>./build_app.sh</code>.</p>
+            <div style="margin-bottom: 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+              <a href="downloads/WhisperSub-macOS-arm64.zip" download="WhisperSub-macOS-arm64.zip" class="btn btn-primary" id="build-btn-download">
+                ⬇ Download WhisperSub.app (3.5 MB .zip)
+              </a>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-build">
+                Copy Commands
+              </button>
+            </div>
+            <pre class="code-block" id="build-code-block"><code># Option A: Run the pre-built binary
+unzip WhisperSub-macOS-arm64.zip
+xattr -cr WhisperSub.app
+open WhisperSub.app
+
+# Option B: Build from source
+git clone https://github.com/windmaple/WhisperSub.git
+cd WhisperSub &amp;&amp; ./build_app.sh &amp;&amp; open WhisperSub.app</code></pre>
+            <div style="margin-top: 10px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted-dark); word-break: break-all;">
+              SHA-256: 6d1c568e51bded971b9767f5a4d3baae5162447f5c2664c7c0aa692c392ed63c
+            </div>
+          </div>
+
+          <div class="shortcuts-panel">
+            <h3>Native macOS Menu Shortcuts</h3>
+            <p>Control every stage of the subtitling workflow directly from the keyboard.</p>
+            <table class="shortcut-table" aria-label="WhisperSub Keyboard Shortcuts">
+              <tbody>
+                <tr>
+                  <td>Open Video File…</td>
+                  <td><kbd>⌘</kbd> <kbd>O</kbd></td>
+                </tr>
+                <tr>
+                  <td>Load Existing <code>.SRT</code> File…</td>
+                  <td><kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>I</kbd></td>
+                </tr>
+                <tr>
+                  <td>Clip Video to Start–End Range</td>
+                  <td><kbd>⌘</kbd> <kbd>K</kbd></td>
+                </tr>
+                <tr>
+                  <td>Transcribe Video on Neural Engine</td>
+                  <td><kbd>⌘</kbd> <kbd>T</kbd></td>
+                </tr>
+                <tr>
+                  <td>Save <code>.SRT</code> Subtitle File…</td>
+                  <td><kbd>⌘</kbd> <kbd>S</kbd></td>
+                </tr>
+                <tr>
+                  <td>Burn Subtitles into Video…</td>
+                  <td><kbd>⌘</kbd> <kbd>B</kbd></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/icon.png" alt="WhisperSub Icon" width="24" height="24" style="border-radius: 6px;" />
+        <span>WhisperSub — AI Video Subtitles on Apple Neural Engine</span>
+      </div>
+      <div class="footer-links">
+        <a href="downloads/WhisperSub-macOS-arm64.zip" download="WhisperSub-macOS-arm64.zip" id="footer-link-download">Download for macOS</a>
+        <a href="https://github.com/windmaple/WhisperSub" target="_blank" rel="noopener noreferrer" id="footer-link-github">GitHub Repository</a>
+        <a href="https://github.com/argmaxinc/WhisperKit" target="_blank" rel="noopener noreferrer" id="footer-link-whisperkit">Powered by WhisperKit</a>
+        <a href="#top" id="footer-link-top">Back to Top ↑</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
