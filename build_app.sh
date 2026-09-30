@@ -21,6 +21,9 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp ".build/release/WhisperSub" "$MACOS_DIR/WhisperSub"
 cp "Info.plist" "$CONTENTS_DIR/Info.plist"
+if [ -f "Resources/AppIcon.icns" ]; then
+    cp "Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
+fi
 chmod +x "$MACOS_DIR/WhisperSub"
 
 # Copy any SwiftPM resource bundles if generated

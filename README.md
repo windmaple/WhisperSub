@@ -1,6 +1,20 @@
-# WhisperSub
+<p align="center">
+  <img src="assets/icon.png" width="128" height="128" alt="WhisperSub Icon">
+</p>
+
+<h1 align="center">🎬 WhisperSub — AI Video Subtitles on Apple Neural Engine</h1>
 
 A native macOS app that transcribes videos using **OpenAI Whisper on the Apple Neural Engine** (via [WhisperKit](https://github.com/argmaxinc/WhisperKit) CoreML), generates `.srt` subtitle files, and burns `.srt` captions directly into the video.
+
+## 📸 Screenshots
+
+<p align="center">
+  <img src="assets/screenshot-workspace.png" width="94%" alt="WhisperSub Main Workspace & Subtitle Cues">
+</p>
+
+<p align="center">
+  <img src="assets/screenshot-burning.png" width="94%" alt="WhisperSub Raw SRT Inspector & Hardware-Accelerated Subtitle Burning">
+</p>
 
 ## Features
 
