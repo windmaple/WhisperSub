@@ -59,10 +59,12 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
     private var cache: [Int: CIImage] = [:]
     private let cues: [SubtitleCue]
     private let renderSize: CGSize
+    private let displayMode: SubtitleDisplayMode
 
-    public init(cues: [SubtitleCue], renderSize: CGSize) {
+    public init(cues: [SubtitleCue], renderSize: CGSize, displayMode: SubtitleDisplayMode = .translatedOnly) {
         self.cues = cues
         self.renderSize = renderSize
+        self.displayMode = displayMode
     }
 
     public func activeCue(at timeSeconds: TimeInterval) -> SubtitleCue? {
@@ -85,7 +87,7 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
         }
         lock.unlock()
 
-        guard let rendered = Self.renderCueImage(text: cue.text, renderSize: renderSize) else {
+        guard let rendered = Self.renderCueImage(cue: cue, displayMode: displayMode, renderSize: renderSize) else {
             return nil
         }
 
@@ -95,7 +97,11 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
         return rendered
     }
 
-    private static func renderCueImage(text: String, renderSize: CGSize) -> CIImage? {
+    private static func renderCueImage(
+        cue: SubtitleCue,
+        displayMode: SubtitleDisplayMode,
+        renderSize: CGSize
+    ) -> CIImage? {
         let width = max(1, Int(renderSize.width.rounded()))
         let height = max(1, Int(renderSize.height.rounded()))
 
@@ -121,31 +127,68 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
             NSGraphicsContext.restoreGraphicsState()
         }
 
-        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanText.isEmpty else { return nil }
-
         let minDimension = min(CGFloat(width), CGFloat(height))
-        let fontSize = max(18.0, min(72.0, round(minDimension * 0.044)))
-        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
-
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = .center
-        paragraphStyle.lineBreakMode = .byWordWrapping
-        paragraphStyle.lineSpacing = max(2.0, round(fontSize * 0.12))
 
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(0.85)
         shadow.shadowBlurRadius = 3.0
         shadow.shadowOffset = NSSize(width: 0, height: -1.5)
 
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.white,
-            .paragraphStyle: paragraphStyle,
-            .shadow: shadow
-        ]
+        let attrString: NSAttributedString
+        let baseFontSize: CGFloat
 
-        let attrString = NSAttributedString(string: cleanText, attributes: attributes)
+        if displayMode == .bilingual,
+           let translated = cue.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !translated.isEmpty,
+           translated != cue.text {
+            baseFontSize = max(16.0, min(60.0, round(minDimension * 0.038)))
+            let originalFontSize = max(13.0, round(baseFontSize * 0.80))
+
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = .center
+            paragraphStyle.lineBreakMode = .byWordWrapping
+            paragraphStyle.lineSpacing = max(2.0, round(baseFontSize * 0.10))
+            paragraphStyle.paragraphSpacing = max(3.0, round(baseFontSize * 0.14))
+
+            let originalAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: originalFontSize, weight: .medium),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.86),
+                .paragraphStyle: paragraphStyle,
+                .shadow: shadow
+            ]
+            let translatedAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: baseFontSize, weight: .semibold),
+                .foregroundColor: NSColor.white,
+                .paragraphStyle: paragraphStyle,
+                .shadow: shadow
+            ]
+
+            let combined = NSMutableAttributedString(
+                string: cue.text.trimmingCharacters(in: .whitespacesAndNewlines) + "\n",
+                attributes: originalAttrs
+            )
+            combined.append(NSAttributedString(string: translated, attributes: translatedAttrs))
+            attrString = combined
+        } else {
+            let cleanText = cue.displayText(for: displayMode).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanText.isEmpty else { return nil }
+
+            baseFontSize = max(18.0, min(72.0, round(minDimension * 0.044)))
+            let font = NSFont.systemFont(ofSize: baseFontSize, weight: .semibold)
+
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = .center
+            paragraphStyle.lineBreakMode = .byWordWrapping
+            paragraphStyle.lineSpacing = max(2.0, round(baseFontSize * 0.12))
+
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.white,
+                .paragraphStyle: paragraphStyle,
+                .shadow: shadow
+            ]
+            attrString = NSAttributedString(string: cleanText, attributes: attributes)
+        }
 
         let maxBoxWidth = CGFloat(width) * 0.84
         let boundingRect = attrString.boundingRect(
@@ -156,8 +199,8 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
         let textWidth = ceil(boundingRect.width)
         let textHeight = ceil(boundingRect.height)
 
-        let horizontalPadding = max(16.0, round(fontSize * 0.65))
-        let verticalPadding = max(10.0, round(fontSize * 0.36))
+        let horizontalPadding = max(16.0, round(baseFontSize * 0.65))
+        let verticalPadding = max(10.0, round(baseFontSize * 0.36))
 
         let pillWidth = min(CGFloat(width) * 0.92, textWidth + horizontalPadding * 2.0)
         let pillHeight = textHeight + verticalPadding * 2.0
@@ -426,7 +469,8 @@ public enum VideoSubtitleBurner {
     /// Creates an `AVVideoComposition` that dynamically renders and caches burned-in subtitle cues.
     public static func makeVideoComposition(
         for asset: AVAsset,
-        cues: [SubtitleCue]
+        cues: [SubtitleCue],
+        displayMode: SubtitleDisplayMode = .translatedOnly
     ) async throws -> AVMutableVideoComposition {
         let tracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = tracks.first else {
@@ -442,7 +486,7 @@ public enum VideoSubtitleBurner {
         )
 
         let sortedCues = cues.sorted { $0.startTime < $1.startTime }
-        let overlayCache = SubtitleOverlayCache(cues: sortedCues, renderSize: renderSize)
+        let overlayCache = SubtitleOverlayCache(cues: sortedCues, renderSize: renderSize, displayMode: displayMode)
 
         let composition = try await AVMutableVideoComposition.videoComposition(
             with: asset,
@@ -477,6 +521,7 @@ public enum VideoSubtitleBurner {
         sourceURL: URL,
         outputURL: URL,
         cues: [SubtitleCue],
+        displayMode: SubtitleDisplayMode = .translatedOnly,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -497,13 +542,14 @@ public enum VideoSubtitleBurner {
                 sourceURL: sourceURL,
                 outputURL: outputURL,
                 cues: cues,
+                displayMode: displayMode,
                 totalDuration: meta.duration,
                 progressHandler: progressHandler
             )
             return
         }
 
-        let videoComposition = try await makeVideoComposition(for: asset, cues: cues)
+        let videoComposition = try await makeVideoComposition(for: asset, cues: cues, displayMode: displayMode)
 
         guard let exportSession = AVAssetExportSession(
             asset: asset,
@@ -547,13 +593,14 @@ public enum VideoSubtitleBurner {
         sourceURL: URL,
         outputURL: URL,
         cues: [SubtitleCue],
+        displayMode: SubtitleDisplayMode = .translatedOnly,
         totalDuration: TimeInterval,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
         let tempDir = FileManager.default.temporaryDirectory
         let tempSRTName = "whispersub_burn_\(UUID().uuidString).srt"
         let tempSRTURL = tempDir.appendingPathComponent(tempSRTName)
-        let srtContent = SRTFormatter.format(cues: cues)
+        let srtContent = SRTFormatter.format(cues: cues, displayMode: displayMode)
         try srtContent.write(to: tempSRTURL, atomically: true, encoding: .utf8)
         defer {
             try? FileManager.default.removeItem(at: tempSRTURL)

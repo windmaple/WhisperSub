@@ -22,6 +22,10 @@ public final class WhisperTranscriptionService: ObservableObject {
     private let storageBaseURL: URL
 
     public init() {
+        // Ensure HubApi always uses huggingface.co directly instead of an environment mirror
+        // (e.g. hf-mirror.com) whose 308 cross-host redirects omit ETag/X-Repo-Commit headers.
+        setenv("HF_ENDPOINT", "https://huggingface.co", 1)
+
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         self.storageBaseURL = appSupport.appendingPathComponent("WhisperSub", isDirectory: true)
@@ -97,6 +101,8 @@ public final class WhisperTranscriptionService: ObservableObject {
 
         state = .loadingModel(modelName: modelOption.displayName)
 
+        try await Self.ensureLocalTokenizerFiles(in: modelFolderURL, variantID: modelOption.id)
+
         let instance = try await Task.detached {
             let computeOptions = ModelComputeOptions(
                 melCompute: .cpuAndGPU,
@@ -125,10 +131,74 @@ public final class WhisperTranscriptionService: ObservableObject {
         self.loadedModelID = modelOption.id
     }
 
-    /// Transcribes a video file on the Apple Neural Engine and returns formatted `SubtitleCue`s.
+    /// Ensures `config.json`, `tokenizer_config.json`, and `tokenizer.json` are present inside `modelFolderURL`
+    /// so `WhisperKit` loads the tokenizer directly from disk without relying on `HubApi.snapshot` metadata headers.
+    nonisolated private static func ensureLocalTokenizerFiles(in modelFolderURL: URL, variantID: String) async throws {
+        let requiredFiles = ["config.json", "tokenizer_config.json", "tokenizer.json"]
+        let missingFiles = requiredFiles.filter { fileName in
+            let fileURL = modelFolderURL.appendingPathComponent(fileName)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+                  let size = attrs[.size] as? NSNumber else {
+                return true
+            }
+            return size.intValue == 0
+        }
+
+        guard !missingFiles.isEmpty else { return }
+
+        let repoID = tokenizerRepoID(for: variantID)
+        try FileManager.default.createDirectory(at: modelFolderURL, withIntermediateDirectories: true)
+
+        for fileName in missingFiles {
+            let destinationURL = modelFolderURL.appendingPathComponent(fileName)
+            let remoteURL = URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(fileName)")!
+            var request = URLRequest(url: remoteURL)
+            request.timeoutInterval = 30
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), !data.isEmpty else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                throw NSError(domain: "WhisperSub", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to download tokenizer file \(fileName) from \(repoID) (HTTP \(code))."
+                ])
+            }
+            try data.write(to: destinationURL, options: .atomic)
+        }
+    }
+
+    nonisolated private static func tokenizerRepoID(for variantID: String) -> String {
+        let lower = variantID.lowercased()
+        if lower.contains("large-v3") {
+            return "openai/whisper-large-v3"
+        } else if lower.contains("large-v2") {
+            return "openai/whisper-large-v2"
+        } else if lower.contains("large") {
+            return "openai/whisper-large"
+        } else if lower.contains("medium.en") {
+            return "openai/whisper-medium.en"
+        } else if lower.contains("medium") {
+            return "openai/whisper-medium"
+        } else if lower.contains("small.en") {
+            return "openai/whisper-small.en"
+        } else if lower.contains("small") {
+            return "openai/whisper-small"
+        } else if lower.contains("base.en") {
+            return "openai/whisper-base.en"
+        } else if lower.contains("base") {
+            return "openai/whisper-base"
+        } else if lower.contains("tiny.en") {
+            return "openai/whisper-tiny.en"
+        } else if lower.contains("tiny") {
+            return "openai/whisper-tiny"
+        }
+        return "openai/whisper-base"
+    }
+
+    /// Transcribes (or translates speech-to-English) a video file on the Apple Neural Engine and returns formatted `SubtitleCue`s.
     public func transcribeVideo(
         videoURL: URL,
-        modelOption: WhisperModelOption
+        modelOption: WhisperModelOption,
+        translateToEnglish: Bool = false
     ) async throws -> [SubtitleCue] {
         do {
             try await prepareModel(modelOption)
@@ -152,12 +222,16 @@ public final class WhisperTranscriptionService: ObservableObject {
             let results: [TranscriptionResult] = try await Task.detached { [weak self] in
                 let detectedLanguage = (try? await unsafePipe.detectLanguage(audioPath: audioURL.path))?.language
                 await MainActor.run { [weak self] in
-                    self?.state = .transcribing(liveText: "Listening and decoding (\(detectedLanguage ?? "auto")) on Apple Neural Engine…")
+                    if translateToEnglish {
+                        self?.state = .transcribing(liveText: "Translating speech (\(detectedLanguage ?? "auto") → en) on Apple Neural Engine…")
+                    } else {
+                        self?.state = .transcribing(liveText: "Listening and decoding (\(detectedLanguage ?? "auto")) on Apple Neural Engine…")
+                    }
                 }
 
                 let decodeOptions = DecodingOptions(
                     verbose: false,
-                    task: .transcribe,
+                    task: translateToEnglish ? .translate : .transcribe,
                     language: detectedLanguage,
                     temperature: 0.0,
                     temperatureFallbackCount: 3,

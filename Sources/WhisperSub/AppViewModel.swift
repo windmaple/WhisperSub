@@ -24,6 +24,18 @@ public final class AppViewModel: ObservableObject {
     @Published public var cues: [SubtitleCue] = []
     @Published public var srtText: String = ""
 
+    @Published public var targetLanguage: TranslationLanguage = TranslationLanguage.defaultLanguage
+    @Published public var autoTranslateOnTranscribe: Bool = false
+    @Published public var useWhisperDirectAudioTranslate: Bool = false
+    @Published public var subtitleDisplayMode: SubtitleDisplayMode = .bilingual {
+        didSet {
+            refreshSRTText()
+        }
+    }
+    @Published public var isTranslating: Bool = false
+    @Published public var translationProgress: Double = 0.0
+    @Published public var translatedLanguage: TranslationLanguage?
+
     @Published public var isBusy: Bool = false
     @Published public var isBurning: Bool = false
     @Published public var burnProgress: Double = 0.0
@@ -34,10 +46,15 @@ public final class AppViewModel: ObservableObject {
     @Published public var lastBurnedVideoURL: URL?
 
     public let transcriptionService = WhisperTranscriptionService()
+    public let translationService = SubtitleTranslationService()
     private var timeObserverToken: Any?
     private weak var observedPlayer: AVPlayer?
 
     public init() {}
+
+    public var hasTranslatedCues: Bool {
+        cues.contains(where: { $0.hasTranslation })
+    }
 
     public var activeSubtitleCue: SubtitleCue? {
         for cue in cues {
@@ -91,6 +108,8 @@ public final class AppViewModel: ObservableObject {
         clipEndText = ""
         cues = []
         srtText = ""
+        translatedLanguage = nil
+        translationService.resetState()
         currentPlaybackTime = 0
 
         let newPlayer = AVPlayer(url: url)
@@ -372,7 +391,11 @@ public final class AppViewModel: ObservableObject {
         return outURL
     }
 
-    // MARK: - Transcription
+    // MARK: - Transcription & Translation
+
+    public func refreshSRTText() {
+        srtText = SRTFormatter.format(cues: cues, displayMode: subtitleDisplayMode)
+    }
 
     public func transcribeCurrentVideo() {
         guard videoURL != nil, !isBusy else { return }
@@ -380,30 +403,63 @@ public final class AppViewModel: ObservableObject {
         errorMessage = nil
         lastSavedSRTURL = nil
         lastBurnedVideoURL = nil
+        translatedLanguage = nil
+        translationService.resetState()
 
         let model = selectedModel
+        let shouldAutoTranslate = autoTranslateOnTranscribe
+        let targetLang = targetLanguage
+        let useDirectWhisperTranslate = useWhisperDirectAudioTranslate && targetLang.id == "en" && subtitleDisplayMode == .translatedOnly
 
         Task {
             defer {
                 isBusy = false
                 isClipping = false
+                isTranslating = false
             }
             do {
                 let targetVideoURL = try await performClipIfNeeded()
                 statusMessage = "Preparing \(model.displayName) on Apple Neural Engine…"
 
-                let generatedCues = try await transcriptionService.transcribeVideo(
+                var generatedCues = try await transcriptionService.transcribeVideo(
                     videoURL: targetVideoURL,
-                    modelOption: model
+                    modelOption: model,
+                    translateToEnglish: useDirectWhisperTranslate
                 )
+
+                if useDirectWhisperTranslate {
+                    self.translatedLanguage = targetLang
+                } else if shouldAutoTranslate && !generatedCues.isEmpty {
+                    isTranslating = true
+                    translationProgress = 0.0
+                    statusMessage = "Translating \(generatedCues.count) subtitle segments to \(targetLang.displayName)…"
+                    generatedCues = try await translationService.translateCues(
+                        generatedCues,
+                        to: targetLang,
+                        progressHandler: { completed, total in
+                            Task { @MainActor [weak self] in
+                                guard let self, total > 0 else { return }
+                                self.translationProgress = Double(completed) / Double(total)
+                            }
+                        }
+                    )
+                    self.translatedLanguage = targetLang
+                    isTranslating = false
+                    translationProgress = 1.0
+                }
+
                 self.cues = generatedCues
-                self.srtText = SRTFormatter.format(cues: generatedCues)
+                self.refreshSRTText()
 
                 // Auto-write a companion .srt next to the video if writable, or inform the user
-                let defaultSRTURL = targetVideoURL.deletingPathExtension().appendingPathExtension("srt")
+                let defaultSRTURL = companionSRTURL(for: targetVideoURL)
                 if (try? self.srtText.write(to: defaultSRTURL, atomically: true, encoding: .utf8)) != nil {
                     self.lastSavedSRTURL = defaultSRTURL
-                    self.statusMessage = "Transcribed \(generatedCues.count) subtitle segments and saved \(defaultSRTURL.lastPathComponent)."
+                    if let lang = self.translatedLanguage {
+                        self.statusMessage = "Transcribed & translated \(generatedCues.count) segments (\(lang.displayName)) → \(defaultSRTURL.lastPathComponent)."
+                    } else {
+                        self.statusMessage = "Transcribed \(generatedCues.count) subtitle segments and saved \(defaultSRTURL.lastPathComponent)."
+                    }
                 } else {
                     self.statusMessage = "Transcribed \(generatedCues.count) subtitle segments. Click \"Save .SRT\" to export."
                 }
@@ -412,6 +468,79 @@ public final class AppViewModel: ObservableObject {
                 self.statusMessage = "Transcription failed."
             }
         }
+    }
+
+    public func translateCurrentSubtitles() {
+        guard !cues.isEmpty, !isBusy else { return }
+        isBusy = true
+        isTranslating = true
+        translationProgress = 0.0
+        errorMessage = nil
+
+        let sourceCues = cues
+        let targetLang = targetLanguage
+
+        Task {
+            defer {
+                isBusy = false
+                isTranslating = false
+            }
+            do {
+                statusMessage = "Translating \(sourceCues.count) subtitle segments to \(targetLang.displayName)…"
+                let translatedCues = try await translationService.translateCues(
+                    sourceCues,
+                    to: targetLang,
+                    progressHandler: { completed, total in
+                        Task { @MainActor [weak self] in
+                            guard let self, total > 0 else { return }
+                            self.translationProgress = Double(completed) / Double(total)
+                        }
+                    }
+                )
+
+                self.cues = translatedCues
+                self.translatedLanguage = targetLang
+                if self.subtitleDisplayMode == .originalOnly {
+                    self.subtitleDisplayMode = .bilingual
+                } else {
+                    self.refreshSRTText()
+                }
+                self.translationProgress = 1.0
+
+                if let activeVideo = self.videoURL {
+                    let outSRT = companionSRTURL(for: activeVideo)
+                    if (try? self.srtText.write(to: outSRT, atomically: true, encoding: .utf8)) != nil {
+                        self.lastSavedSRTURL = outSRT
+                        self.statusMessage = "Translated \(translatedCues.count) cues to \(targetLang.displayName) (\(subtitleDisplayMode.compactLabel)) → \(outSRT.lastPathComponent)."
+                        return
+                    }
+                }
+                self.statusMessage = "Translated \(translatedCues.count) subtitle cues to \(targetLang.displayName) (\(subtitleDisplayMode.compactLabel))."
+            } catch {
+                self.errorMessage = error.localizedDescription
+                self.statusMessage = "Subtitle translation failed."
+            }
+        }
+    }
+
+    public func clearTranslations() {
+        guard hasTranslatedCues, !isBusy else { return }
+        cues = cues.map { cue in
+            SubtitleCue(id: cue.id, startTime: cue.startTime, endTime: cue.endTime, text: cue.text, translatedText: nil)
+        }
+        translatedLanguage = nil
+        translationService.resetState()
+        refreshSRTText()
+        statusMessage = "Cleared translated subtitles (showing original)."
+    }
+
+    private func companionSRTURL(for videoURL: URL) -> URL {
+        let base = videoURL.deletingPathExtension()
+        if let lang = translatedLanguage, hasTranslatedCues {
+            let suffix = subtitleDisplayMode == .bilingual ? "bilingual_\(lang.id)" : lang.id
+            return base.deletingLastPathComponent().appendingPathComponent("\(base.lastPathComponent)_\(suffix).srt")
+        }
+        return base.appendingPathExtension("srt")
     }
 
     // MARK: - SRT Import / Export
@@ -425,14 +554,19 @@ public final class AppViewModel: ObservableObject {
             panel.allowedContentTypes = [srtType]
         }
         let baseName = videoURL?.deletingPathExtension().lastPathComponent ?? "subtitles"
-        panel.nameFieldStringValue = "\(baseName).srt"
+        if let lang = translatedLanguage, hasTranslatedCues, subtitleDisplayMode != .originalOnly {
+            let suffix = subtitleDisplayMode == .bilingual ? "bilingual_\(lang.id)" : lang.id
+            panel.nameFieldStringValue = "\(baseName)_\(suffix).srt"
+        } else {
+            panel.nameFieldStringValue = "\(baseName).srt"
+        }
 
         if panel.runModal() == .OK, let targetURL = panel.url {
             do {
-                let content = SRTFormatter.format(cues: cues)
+                let content = SRTFormatter.format(cues: cues, displayMode: subtitleDisplayMode)
                 try content.write(to: targetURL, atomically: true, encoding: .utf8)
                 lastSavedSRTURL = targetURL
-                statusMessage = "Saved subtitles to \(targetURL.lastPathComponent)."
+                statusMessage = "Saved subtitles (\(subtitleDisplayMode.compactLabel)) to \(targetURL.lastPathComponent)."
             } catch {
                 errorMessage = "Could not save .srt file: \(error.localizedDescription)"
             }
@@ -454,7 +588,9 @@ public final class AppViewModel: ObservableObject {
                 let raw = try String(contentsOf: url, encoding: .utf8)
                 let parsed = SRTFormatter.parse(raw)
                 self.cues = parsed
-                self.srtText = SRTFormatter.format(cues: parsed)
+                self.translatedLanguage = nil
+                self.translationService.resetState()
+                self.refreshSRTText()
                 self.lastSavedSRTURL = url
                 self.statusMessage = "Loaded \(parsed.count) subtitle cues from \(url.lastPathComponent)."
             } catch {
@@ -467,7 +603,7 @@ public final class AppViewModel: ObservableObject {
         guard !srtText.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(srtText, forType: .string)
-        statusMessage = "Copied .SRT content (\(cues.count) cues) to clipboard."
+        statusMessage = "Copied .SRT content (\(cues.count) cues, \(subtitleDisplayMode.compactLabel)) to clipboard."
     }
 
     // MARK: - Burn Subtitles into Video
@@ -479,7 +615,12 @@ public final class AppViewModel: ObservableObject {
         panel.title = "Export Video with Burned-In Subtitles"
         panel.allowedContentTypes = [.mpeg4Movie]
         let baseName = videoURL.deletingPathExtension().lastPathComponent
-        panel.nameFieldStringValue = "\(baseName)_subtitled.mp4"
+        if let lang = translatedLanguage, hasTranslatedCues, subtitleDisplayMode != .originalOnly {
+            let suffix = subtitleDisplayMode == .bilingual ? "bilingual_\(lang.id)" : lang.id
+            panel.nameFieldStringValue = "\(baseName)_subtitled_\(suffix).mp4"
+        } else {
+            panel.nameFieldStringValue = "\(baseName)_subtitled.mp4"
+        }
 
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
 
@@ -487,9 +628,10 @@ public final class AppViewModel: ObservableObject {
         isBurning = true
         burnProgress = 0.0
         errorMessage = nil
-        statusMessage = "Burning \(cues.count) subtitles into video…"
+        statusMessage = "Burning \(cues.count) subtitles (\(subtitleDisplayMode.compactLabel)) into video…"
 
         let currentCues = self.cues
+        let currentDisplayMode = self.subtitleDisplayMode
 
         Task {
             defer {
@@ -501,7 +643,8 @@ public final class AppViewModel: ObservableObject {
                     sourceURL: videoURL,
                     outputURL: outputURL,
                     cues: currentCues,
-                    progressHandler: { [weak self] progress in
+                    displayMode: currentDisplayMode,
+                    progressHandler: { progress in
                         Task { @MainActor [weak self] in
                             self?.burnProgress = progress
                         }
@@ -509,7 +652,7 @@ public final class AppViewModel: ObservableObject {
                 )
                 self.burnProgress = 1.0
                 self.lastBurnedVideoURL = outputURL
-                self.statusMessage = "Burned subtitles into \(outputURL.lastPathComponent)!"
+                self.statusMessage = "Burned subtitles (\(currentDisplayMode.compactLabel)) into \(outputURL.lastPathComponent)!"
                 if self.videoMetadata?.isNativelyPlayable == false {
                     let burnedPlayer = AVPlayer(url: outputURL)
                     self.player = burnedPlayer

@@ -1,16 +1,128 @@
 import Foundation
 
+public enum SubtitleDisplayMode: String, CaseIterable, Identifiable, Sendable {
+    case translatedOnly = "Translated Only"
+    case bilingual = "Bilingual (Original + Translated)"
+    case originalOnly = "Original Only"
+
+    public var id: String { rawValue }
+
+    public var compactLabel: String {
+        switch self {
+        case .translatedOnly: return "Translated"
+        case .bilingual: return "Bilingual"
+        case .originalOnly: return "Original"
+        }
+    }
+}
+
+public struct TranslationLanguage: Identifiable, Equatable, Hashable, Sendable {
+    public let id: String          // BCP-47 / ISO language code (e.g. "zh-CN", "en", "es", "ja")
+    public let displayName: String // English name
+    public let nativeName: String  // Native script name
+
+    public var fullDisplayName: String {
+        if displayName == nativeName {
+            return displayName
+        }
+        return "\(displayName) • \(nativeName)"
+    }
+
+    public static let availableLanguages: [TranslationLanguage] = [
+        TranslationLanguage(id: "zh-CN", displayName: "Chinese (Simplified)", nativeName: "简体中文"),
+        TranslationLanguage(id: "zh-TW", displayName: "Chinese (Traditional)", nativeName: "繁體中文"),
+        TranslationLanguage(id: "en", displayName: "English", nativeName: "English"),
+        TranslationLanguage(id: "ja", displayName: "Japanese", nativeName: "日本語"),
+        TranslationLanguage(id: "ko", displayName: "Korean", nativeName: "한국어"),
+        TranslationLanguage(id: "es", displayName: "Spanish", nativeName: "Español"),
+        TranslationLanguage(id: "fr", displayName: "French", nativeName: "Français"),
+        TranslationLanguage(id: "de", displayName: "German", nativeName: "Deutsch"),
+        TranslationLanguage(id: "pt", displayName: "Portuguese", nativeName: "Português"),
+        TranslationLanguage(id: "ru", displayName: "Russian", nativeName: "Русский"),
+        TranslationLanguage(id: "ar", displayName: "Arabic", nativeName: "العربية"),
+        TranslationLanguage(id: "hi", displayName: "Hindi", nativeName: "हिन्दी"),
+        TranslationLanguage(id: "it", displayName: "Italian", nativeName: "Italiano"),
+        TranslationLanguage(id: "nl", displayName: "Dutch", nativeName: "Nederlands"),
+        TranslationLanguage(id: "tr", displayName: "Turkish", nativeName: "Türkçe"),
+        TranslationLanguage(id: "vi", displayName: "Vietnamese", nativeName: "Tiếng Việt"),
+        TranslationLanguage(id: "th", displayName: "Thai", nativeName: "ไทย"),
+        TranslationLanguage(id: "id", displayName: "Indonesian", nativeName: "Bahasa Indonesia")
+    ]
+
+    public static let defaultLanguage = availableLanguages[0] // Chinese (Simplified)
+
+    /// Resolves a language code or name (e.g. "zh", "zh-CN", "en", "japanese", "spanish") to a `TranslationLanguage`.
+    public static func resolve(_ query: String) -> TranslationLanguage? {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+
+        if normalized == "zh" || normalized == "zh-hans" || normalized == "cn" || normalized == "chinese" {
+            return availableLanguages.first { $0.id == "zh-CN" }
+        }
+        if normalized == "zh-hant" || normalized == "tw" || normalized == "hk" {
+            return availableLanguages.first { $0.id == "zh-TW" }
+        }
+
+        if let exact = availableLanguages.first(where: {
+            $0.id.lowercased() == normalized ||
+            $0.displayName.lowercased() == normalized ||
+            $0.nativeName.lowercased() == normalized
+        }) {
+            return exact
+        }
+
+        return availableLanguages.first(where: {
+            $0.displayName.lowercased().contains(normalized) ||
+            $0.id.lowercased().hasPrefix(normalized)
+        })
+    }
+}
+
 public struct SubtitleCue: Identifiable, Equatable, Hashable, Sendable {
     public let id: Int
     public var startTime: TimeInterval
     public var endTime: TimeInterval
     public var text: String
+    public var translatedText: String?
 
-    public init(id: Int, startTime: TimeInterval, endTime: TimeInterval, text: String) {
+    public init(
+        id: Int,
+        startTime: TimeInterval,
+        endTime: TimeInterval,
+        text: String,
+        translatedText: String? = nil
+    ) {
         self.id = id
         self.startTime = max(0, startTime)
         self.endTime = max(self.startTime + 0.05, endTime)
         self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTranslation = translatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.translatedText = (trimmedTranslation?.isEmpty == false) ? trimmedTranslation : nil
+    }
+
+    public var hasTranslation: Bool {
+        guard let t = translatedText?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !t.isEmpty
+    }
+
+    public func displayText(for mode: SubtitleDisplayMode) -> String {
+        guard let translated = translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !translated.isEmpty else {
+            return text
+        }
+        switch mode {
+        case .originalOnly:
+            return text
+        case .translatedOnly:
+            return translated
+        case .bilingual:
+            if translated == text {
+                return text
+            }
+            return "\(text)\n\(translated)"
+        }
     }
 
     public var formattedTimeRange: String {
@@ -89,16 +201,29 @@ public enum SRTFormatter {
         }
     }
 
-    /// Generates a complete `.srt` file string from an array of `SubtitleCue`s.
-    public static func format(cues: [SubtitleCue]) -> String {
+    /// Generates a complete `.srt` file string from an array of `SubtitleCue`s using the requested `SubtitleDisplayMode`.
+    public static func format(cues: [SubtitleCue], displayMode: SubtitleDisplayMode = .translatedOnly) -> String {
         guard !cues.isEmpty else { return "" }
         return cues.enumerated().map { index, cue in
             let seq = index + 1
             let start = formatTimestamp(cue.startTime)
             let end = formatTimestamp(cue.endTime)
-            let cleanText = cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanText = cue.displayText(for: displayMode).trimmingCharacters(in: .whitespacesAndNewlines)
             return "\(seq)\n\(start) --> \(end)\n\(cleanText)"
         }.joined(separator: "\n\n") + "\n"
+    }
+
+    /// Returns a copy of `cues` where each cue's `text` is resolved for the specified `SubtitleDisplayMode`.
+    public static func resolvedCues(_ cues: [SubtitleCue], displayMode: SubtitleDisplayMode) -> [SubtitleCue] {
+        cues.map { cue in
+            SubtitleCue(
+                id: cue.id,
+                startTime: cue.startTime,
+                endTime: cue.endTime,
+                text: cue.displayText(for: displayMode),
+                translatedText: cue.translatedText
+            )
+        }
     }
 
     /// Parses a `.srt` file string into `[SubtitleCue]`.

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 public struct ContentView: View {
     @ObservedObject var viewModel: AppViewModel
     @ObservedObject var transcriptionService: WhisperTranscriptionService
+    @ObservedObject var translationService: SubtitleTranslationService
 
     @State private var isDropTargeted: Bool = false
     @State private var inspectorMode: InspectorMode = .cues
@@ -18,6 +19,7 @@ public struct ContentView: View {
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
         self.transcriptionService = viewModel.transcriptionService
+        self.translationService = viewModel.translationService
     }
 
     public var body: some View {
@@ -119,6 +121,8 @@ public struct ContentView: View {
 
             videoClipBar
 
+            subtitleTranslationBar
+
             workflowActionBar
 
             statusAndProgressCard
@@ -199,19 +203,37 @@ public struct ContentView: View {
             }
 
             if let cue = viewModel.activeSubtitleCue {
-                Text(cue.text)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.black.opacity(0.78))
-                    )
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 42)
-                    .allowsHitTesting(false)
+                Group {
+                    if viewModel.subtitleDisplayMode == .bilingual,
+                       let translated = cue.translatedText,
+                       !translated.isEmpty,
+                       translated != cue.text {
+                        VStack(spacing: 3) {
+                            Text(cue.text)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.86))
+                                .multilineTextAlignment(.center)
+                            Text(translated)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                        }
+                    } else {
+                        Text(cue.displayText(for: viewModel.subtitleDisplayMode))
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.black.opacity(0.78))
+                )
+                .padding(.horizontal, 24)
+                .padding(.bottom, 42)
+                .allowsHitTesting(false)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -358,7 +380,98 @@ public struct ContentView: View {
         )
     }
 
+    // MARK: - Subtitle Translation Bar
+
+    private var subtitleTranslationBar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 5) {
+                Image(systemName: "globe")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(viewModel.hasTranslatedCues || viewModel.autoTranslateOnTranscribe ? Color.accentColor : .secondary)
+                Text("Translate:")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+
+            Picker("", selection: $viewModel.targetLanguage) {
+                ForEach(TranslationLanguage.availableLanguages) { lang in
+                    Text(lang.fullDisplayName).tag(lang)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 175)
+            .disabled(viewModel.isBusy)
+            .help("Target language for subtitle translation")
+
+            Picker("", selection: $viewModel.subtitleDisplayMode) {
+                ForEach(SubtitleDisplayMode.allCases) { mode in
+                    Text(mode.compactLabel).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 195)
+            .disabled(viewModel.isBusy)
+            .help("Toggle between Translated Only, Bilingual (Original + Translated stacked), or Original Only")
+
+            Toggle("Auto", isOn: $viewModel.autoTranslateOnTranscribe)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11, weight: .medium))
+                .disabled(viewModel.isBusy)
+                .help("Automatically translate subtitles after Whisper transcription completes")
+
+            if viewModel.targetLanguage.id == "en" && viewModel.subtitleDisplayMode == .translatedOnly {
+                Toggle("Whisper Audio→EN", isOn: $viewModel.useWhisperDirectAudioTranslate)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
+                    .disabled(viewModel.isBusy)
+                    .help("Use Whisper's on-device speech-to-English task during transcription")
+            }
+
+            Spacer()
+
+            Button {
+                viewModel.translateCurrentSubtitles()
+            } label: {
+                Label("Translate", systemImage: "character.bubble.fill")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .controlSize(.small)
+            .buttonStyle(.bordered)
+            .disabled(viewModel.cues.isEmpty || viewModel.isBusy)
+            .help("Translate current subtitle cues into \(viewModel.targetLanguage.displayName)")
+
+            if viewModel.hasTranslatedCues {
+                Button("Clear") {
+                    viewModel.clearTranslations()
+                }
+                .controlSize(.small)
+                .disabled(viewModel.isBusy)
+                .help("Remove translations and revert to original subtitles")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(NSColor.controlBackgroundColor))
+        )
+    }
+
     // MARK: - Workflow Action Bar
+
+    private var transcribeButtonTitle: String {
+        let willClip = viewModel.hasUnappliedClipChanges && viewModel.hasCustomClipRange
+        let willTranslate = viewModel.autoTranslateOnTranscribe || (viewModel.useWhisperDirectAudioTranslate && viewModel.targetLanguage.id == "en" && viewModel.subtitleDisplayMode == .translatedOnly)
+        switch (willClip, willTranslate) {
+        case (true, true):
+            return "1. Clip, Transcribe & Translate"
+        case (true, false):
+            return "1. Clip & Transcribe"
+        case (false, true):
+            return "1. Transcribe & Translate"
+        case (false, false):
+            return "1. Transcribe Video"
+        }
+    }
 
     private var workflowActionBar: some View {
         HStack(spacing: 10) {
@@ -366,9 +479,7 @@ public struct ContentView: View {
                 viewModel.transcribeCurrentVideo()
             } label: {
                 Label(
-                    viewModel.hasUnappliedClipChanges && viewModel.hasCustomClipRange
-                        ? "1. Clip & Transcribe"
-                        : "1. Transcribe Video",
+                    transcribeButtonTitle,
                     systemImage: "waveform.badge.mic"
                 )
                 .font(.system(size: 13, weight: .semibold))
@@ -511,7 +622,7 @@ public struct ContentView: View {
                         .truncationMode(.head)
                 }
 
-            case .completed(let count, let speed) where !viewModel.isBurning && !viewModel.isClipping:
+            case .completed(let count, let speed) where !viewModel.isBurning && !viewModel.isClipping && !viewModel.isTranslating:
                 if speed > 0 {
                     Text("Neural Engine decoded \(count) segments at \(String(format: "%.1f×", speed)) real-time speed.")
                         .font(.system(size: 11))
@@ -520,6 +631,29 @@ public struct ContentView: View {
 
             default:
                 EmptyView()
+            }
+
+            if viewModel.isTranslating {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        if case .translating(let completed, let total, let lang) = translationService.state {
+                            Text("Translating subtitles to \(lang)… (\(completed)/\(total))")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Translating subtitles to \(viewModel.targetLanguage.displayName)…")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text("\(Int((viewModel.translationProgress * 100).rounded()))%")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: viewModel.translationProgress, total: 1.0)
+                        .progressViewStyle(.linear)
+                        .tint(.purple)
+                }
             }
 
             if viewModel.isBurning {
@@ -585,7 +719,21 @@ public struct ContentView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 220)
+                .frame(width: 210)
+
+                if let lang = viewModel.translatedLanguage, viewModel.hasTranslatedCues {
+                    HStack(spacing: 4) {
+                        Image(systemName: "globe")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("\(lang.id) • \(viewModel.subtitleDisplayMode.compactLabel)")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Color.purple.opacity(0.15))
+                    .foregroundStyle(Color.purple)
+                    .clipShape(Capsule())
+                }
 
                 Spacer()
 
@@ -663,11 +811,43 @@ public struct ContentView: View {
                                 Text(cue.formattedTimeRange)
                                     .font(.system(size: 10, design: .monospaced))
                                     .foregroundStyle(.secondary)
-                                Text(cue.text)
-                                    .font(.system(size: 13, weight: isActive ? .semibold : .regular))
-                                    .foregroundStyle(.primary)
-                                    .multilineTextAlignment(.leading)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                switch viewModel.subtitleDisplayMode {
+                                case .bilingual:
+                                    Text(cue.text)
+                                        .font(.system(size: 12, weight: isActive ? .medium : .regular))
+                                        .foregroundStyle(cue.hasTranslation ? .secondary : .primary)
+                                        .multilineTextAlignment(.leading)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    if let translated = cue.translatedText, !translated.isEmpty, translated != cue.text {
+                                        Text(translated)
+                                            .font(.system(size: 13, weight: isActive ? .semibold : .medium))
+                                            .foregroundStyle(.primary)
+                                            .multilineTextAlignment(.leading)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+
+                                case .translatedOnly:
+                                    Text(cue.displayText(for: .translatedOnly))
+                                        .font(.system(size: 13, weight: isActive ? .semibold : .regular))
+                                        .foregroundStyle(.primary)
+                                        .multilineTextAlignment(.leading)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    if let translated = cue.translatedText, !translated.isEmpty, translated != cue.text {
+                                        Text(cue.text)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.tertiary)
+                                            .multilineTextAlignment(.leading)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+
+                                case .originalOnly:
+                                    Text(cue.text)
+                                        .font(.system(size: 13, weight: isActive ? .semibold : .regular))
+                                        .foregroundStyle(.primary)
+                                        .multilineTextAlignment(.leading)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
                             }
                         }
                         .padding(10)
@@ -713,7 +893,9 @@ public struct ContentView: View {
                     if let raw = try? String(contentsOf: url, encoding: .utf8) {
                         let parsed = SRTFormatter.parse(raw)
                         viewModel.cues = parsed
-                        viewModel.srtText = SRTFormatter.format(cues: parsed)
+                        viewModel.translatedLanguage = nil
+                        viewModel.translationService.resetState()
+                        viewModel.refreshSRTText()
                         viewModel.lastSavedSRTURL = url
                         viewModel.statusMessage = "Loaded \(parsed.count) subtitle cues from \(url.lastPathComponent)."
                     }

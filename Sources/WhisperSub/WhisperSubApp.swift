@@ -23,16 +23,20 @@ struct WhisperSubMain {
     @MainActor
     private static func runCLIMode(args: [String]) async {
         guard let inputPath = args.first else {
-            fputs("Usage: WhisperSub --cli <input-video> [--start <time>] [--end <time>] [--clip-out <clip.mp4>] [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
+            fputs("Usage: WhisperSub --cli <input-video> [--start <time>] [--end <time>] [--clip-out <clip.mp4>] [--translate <lang>] [--bilingual] [--whisper-translate] [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
             exit(1)
         }
 
         let inputURL = URL(fileURLWithPath: inputPath)
         var srtOutURL = inputURL.deletingPathExtension().appendingPathExtension("srt")
+        var explicitSRT = false
         var burnOutURL: URL?
         var clipOutURL: URL?
         var clipStartArg: String?
         var clipEndArg: String?
+        var translateLangArg: String?
+        var bilingualMode = false
+        var whisperDirectTranslate = false
         var modelOption = WhisperModelOption.defaultModel
         var burnOnly = false
 
@@ -54,9 +58,19 @@ struct WhisperSubMain {
                     clipOutURL = URL(fileURLWithPath: args[i + 1])
                     i += 1
                 }
+            case "--translate":
+                if i + 1 < args.count {
+                    translateLangArg = args[i + 1]
+                    i += 1
+                }
+            case "--bilingual":
+                bilingualMode = true
+            case "--whisper-translate":
+                whisperDirectTranslate = true
             case "--srt":
                 if i + 1 < args.count {
                     srtOutURL = URL(fileURLWithPath: args[i + 1])
+                    explicitSRT = true
                     i += 1
                 }
             case "--burn":
@@ -79,6 +93,8 @@ struct WhisperSubMain {
             }
             i += 1
         }
+
+        let displayMode: SubtitleDisplayMode = bilingualMode ? .bilingual : .translatedOnly
 
         do {
             print("🎬 Inspecting video: \(inputURL.path)")
@@ -122,28 +138,57 @@ struct WhisperSubMain {
                 print("✅ Clipped video duration: \(clippedMeta.formattedDuration)")
             }
 
-            let cues: [SubtitleCue]
+            var cues: [SubtitleCue]
             if burnOnly, FileManager.default.fileExists(atPath: srtOutURL.path) {
                 let raw = try String(contentsOf: srtOutURL, encoding: .utf8)
                 cues = SRTFormatter.parse(raw)
                 print("📝 Loaded \(cues.count) existing subtitle segment(s) from: \(srtOutURL.path)")
             } else {
                 let service = WhisperTranscriptionService()
-                print("🧠 Transcribing on Apple Neural Engine using \(modelOption.displayName) (\(modelOption.id))...")
-                cues = try await service.transcribeVideo(videoURL: activeVideoURL, modelOption: modelOption)
+                let directAudioTranslate = whisperDirectTranslate && !bilingualMode && (translateLangArg == nil || translateLangArg?.lowercased() == "en")
+                if directAudioTranslate {
+                    print("🧠 Translating speech-to-English on Apple Neural Engine using \(modelOption.displayName) (\(modelOption.id))...")
+                } else {
+                    print("🧠 Transcribing on Apple Neural Engine using \(modelOption.displayName) (\(modelOption.id))...")
+                }
+                cues = try await service.transcribeVideo(
+                    videoURL: activeVideoURL,
+                    modelOption: modelOption,
+                    translateToEnglish: directAudioTranslate
+                )
                 print("✅ Transcribed \(cues.count) subtitle segment(s).")
+            }
 
-                let srtContent = SRTFormatter.format(cues: cues)
+            if let rawLang = translateLangArg {
+                let targetLang = TranslationLanguage.resolve(rawLang)
+                    ?? TranslationLanguage(id: rawLang, displayName: rawLang, nativeName: rawLang)
+                let directAudioTranslate = whisperDirectTranslate && !bilingualMode && targetLang.id.lowercased() == "en" && !burnOnly
+                if !directAudioTranslate {
+                    print("🌐 Translating \(cues.count) subtitle segment(s) to \(targetLang.fullDisplayName) (\(displayMode.compactLabel))...")
+                    let translator = SubtitleTranslationService()
+                    cues = try await translator.translateCues(cues, to: targetLang)
+                    print("✅ Translated \(cues.count) subtitle segment(s) to \(targetLang.displayName).")
+                }
+                if !explicitSRT && !burnOnly {
+                    let base = inputURL.deletingPathExtension()
+                    let suffix = bilingualMode ? "bilingual_\(targetLang.id)" : targetLang.id
+                    srtOutURL = base.deletingLastPathComponent().appendingPathComponent("\(base.lastPathComponent)_\(suffix).srt")
+                }
+            }
+
+            if !burnOnly || translateLangArg != nil {
+                let srtContent = SRTFormatter.format(cues: cues, displayMode: displayMode)
                 try srtContent.write(to: srtOutURL, atomically: true, encoding: .utf8)
-                print("📝 Saved .SRT file to: \(srtOutURL.path)")
+                print("📝 Saved .SRT file (\(displayMode.compactLabel)) to: \(srtOutURL.path)")
             }
 
             if let burnURL = burnOutURL {
-                print("🔥 Burning subtitles into video: \(burnURL.path)")
+                print("🔥 Burning subtitles (\(displayMode.compactLabel)) into video: \(burnURL.path)")
                 try await VideoSubtitleBurner.burnSubtitles(
                     sourceURL: activeVideoURL,
                     outputURL: burnURL,
                     cues: cues,
+                    displayMode: displayMode,
                     progressHandler: { _ in }
                 )
                 print("✅ Exported burned video to: \(burnURL.path)")
@@ -207,6 +252,12 @@ struct WhisperSubGUIApp: App {
                 }
                 .keyboardShortcut("t", modifiers: [.command])
                 .disabled(viewModel.videoURL == nil || viewModel.isBusy)
+
+                Button("Translate Subtitles") {
+                    viewModel.translateCurrentSubtitles()
+                }
+                .keyboardShortcut("l", modifiers: [.command])
+                .disabled(viewModel.cues.isEmpty || viewModel.isBusy)
 
                 Button("Save .SRT File…") {
                     viewModel.saveSRTFile()
