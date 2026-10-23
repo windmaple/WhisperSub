@@ -103,6 +103,10 @@
                 <span class="spec-value">AVFoundation + CoreImage</span>
               </div>
               <div class="spec-row">
+                <span class="spec-label">Subtitle Translation</span>
+                <span class="spec-value">18+ Languages • Bilingual / Single</span>
+              </div>
+              <div class="spec-row">
                 <span class="spec-label">Supported Input Containers</span>
                 <span class="spec-value">.mp4 .mov .m4v .avi .webm .mkv</span>
               </div>
@@ -160,14 +164,14 @@
               <p class="annotation-text">Select from Tiny, Base, Small, or Large v3 Turbo and clip any <code>Start</code> to <code>End</code> timestamp before transcribing.</p>
             </div>
             <div class="annotation-item">
-              <div class="annotation-step">02 • DUAL INSPECTOR</div>
-              <div class="annotation-title">Subtitle Cues &amp; Raw .SRT View</div>
-              <p class="annotation-text">Inspect timed segments with millisecond accuracy (<code>HH:MM:SS,mmm --&gt; HH:MM:SS,mmm</code>), import existing <code>.srt</code> files, or copy with one click.</p>
+              <div class="annotation-step">02 • MULTI-LANGUAGE TRANSLATION</div>
+              <div class="annotation-title">18+ Languages &amp; Bilingual Inspector</div>
+              <p class="annotation-text">Translate cues with one click (<code>⌘L</code>) and toggle between <strong>Bilingual (Original + Translated)</strong>, <strong>Translated Only</strong>, and <strong>Original Only</strong>.</p>
             </div>
             <div class="annotation-item">
               <div class="annotation-step">03 • HARDWARE COMPOSITOR</div>
-              <div class="annotation-title">Direct MP4 Subtitle Burning</div>
-              <p class="annotation-text">Render anti-aliased captions directly into the video track using native <code>AVFoundation</code> &amp; <code>CoreImage</code> pipelines.</p>
+              <div class="annotation-title">Bilingual &amp; Translated MP4 Burn-In</div>
+              <p class="annotation-text">Render stacked two-line bilingual captions or translated-only subtitles directly into the video track using native <code>AVFoundation</code> &amp; <code>CoreImage</code>.</p>
             </div>
           </div>
         </div>
@@ -179,9 +183,9 @@
       <div class="container">
         <div class="section-header">
           <span class="section-eyebrow">Interactive Preview</span>
-          <h2 class="section-title">Test the Subtitle Cue &amp; .SRT Inspector</h2>
+          <h2 class="section-title">Test the Subtitle Translation, Bilingual Overlay &amp; .SRT Inspector</h2>
           <p class="section-desc">
-            Click any transcribed cue below to jump the playhead and preview the burned caption overlay, or switch to the <strong>Raw .SRT</strong> tab to edit timestamps and export a standard <code>.srt</code> file right from your browser.
+            Translate demo cues into <strong>Simplified/Traditional Chinese, Japanese, Spanish, French, German, or Korean</strong>, toggle between <strong>Bilingual</strong> and <strong>Translated Only</strong> modes, and preview how stacked captions look on the video player and inside the <code>.srt</code> inspector.
           </p>
         </div>
 
@@ -228,6 +232,39 @@
                 </div>
                 <div>
                   <span class="file-meta">Clip Range: <strong>00:10.0 → 01:25.0</strong></span>
+                </div>
+              </div>
+
+              <!-- Interactive Subtitle Translation Bar -->
+              <div class="workbench-translation-bar" id="demo-translation-bar">
+                <div class="translation-bar-row">
+                  <span class="translation-bar-title">🌐 Subtitle Translation</span>
+                  <select id="demo-translate-lang" class="form-select form-select-sm" aria-label="Target Translation Language">
+                    <option value="zh-CN">Chinese (Simplified) • 简体中文</option>
+                    <option value="zh-TW">Chinese (Traditional) • 繁體中文</option>
+                    <option value="ja">Japanese • 日本語</option>
+                    <option value="es">Spanish • Español</option>
+                    <option value="fr">French • Français</option>
+                    <option value="de">German • Deutsch</option>
+                    <option value="ko">Korean • 한국어</option>
+                  </select>
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-demo-translate">
+                    Translate (⌘L)
+                  </button>
+                </div>
+                <div class="translation-bar-row">
+                  <span class="file-meta">Display &amp; Export Mode:</span>
+                  <div class="segmented-control segmented-control-sm" role="tablist" aria-label="Subtitle Display Mode">
+                    <button type="button" class="segment-btn segment-btn-sm active" id="mode-btn-bilingual" data-display-mode="bilingual">
+                      Bilingual (Orig + Trans)
+                    </button>
+                    <button type="button" class="segment-btn segment-btn-sm" id="mode-btn-translated" data-display-mode="translated">
+                      Translated Only
+                    </button>
+                    <button type="button" class="segment-btn segment-btn-sm" id="mode-btn-original" data-display-mode="original">
+                      Original Only
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -326,14 +363,14 @@
             <div>
               <div class="step-num-row">
                 <span class="step-number">STEP 03</span>
-                <span class="step-shortcut">⌘T / ⌘S</span>
+                <span class="step-shortcut">⌘T / ⌘L / ⌘S</span>
               </div>
-              <h3 class="step-heading">Transcribe &amp; Save .SRT</h3>
+              <h3 class="step-heading">Transcribe, Translate &amp; Save .SRT</h3>
               <p class="step-body">
-                Extracts 16 kHz mono WAV audio, auto-detects spoken language, strips Whisper special tokens, splits long captions at 88 characters, and formats standard <code>.srt</code> cues.
+                Extracts 16 kHz mono WAV audio, auto-detects spoken language, translates subtitles into 18+ target languages, and exports <strong>Bilingual</strong> or <strong>Translated-Only</strong> <code>.srt</code> files.
               </p>
             </div>
-            <div class="step-tech-tag">WhisperKit CoreML • VAD Chunking</div>
+            <div class="step-tech-tag">WhisperKit CoreML • Neural Translation</div>
           </article>
 
           <article class="pipeline-step">
@@ -342,9 +379,9 @@
                 <span class="step-number">STEP 04</span>
                 <span class="step-shortcut">⌘B</span>
               </div>
-              <h3 class="step-heading">Burn .SRT into Video</h3>
+              <h3 class="step-heading">Burn Bilingual or Translated MP4</h3>
               <p class="step-body">
-                Composites high-contrast, rounded subtitle overlays frame-by-frame onto the video track with real-time progress reporting and one-click Finder reveal.
+                Composites high-contrast single-line or stacked two-line bilingual subtitle overlays frame-by-frame onto the video track with real-time progress reporting.
               </p>
             </div>
             <div class="step-tech-tag">AVVideoComposition • CoreImage</div>
@@ -504,20 +541,44 @@
               </div>
             </div>
 
-            <div class="form-group">
-              <label class="form-label" for="cli-model-select">Whisper Model (<code>--model</code>)</label>
-              <select id="cli-model-select" class="form-select">
-                <option value="">Default (openai_whisper-base)</option>
-                <option value="openai_whisper-tiny">openai_whisper-tiny (~75 MB)</option>
-                <option value="openai_whisper-small">openai_whisper-small (~485 MB)</option>
-                <option value="openai_whisper-large-v3_turbo">openai_whisper-large-v3_turbo (~950 MB)</option>
-              </select>
+            <div class="form-row-2">
+              <div class="form-group">
+                <label class="form-label" for="cli-model-select">Whisper Model (<code>--model</code>)</label>
+                <select id="cli-model-select" class="form-select">
+                  <option value="">Default (openai_whisper-base)</option>
+                  <option value="openai_whisper-tiny">openai_whisper-tiny (~75 MB)</option>
+                  <option value="openai_whisper-small">openai_whisper-small (~485 MB)</option>
+                  <option value="openai_whisper-large-v3_turbo">openai_whisper-large-v3_turbo (~950 MB)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cli-translate-select">Translate To (<code>--translate</code>)</label>
+                <select id="cli-translate-select" class="form-select">
+                  <option value="zh-CN" selected>zh-CN (Chinese Simplified)</option>
+                  <option value="">None (Original Language Only)</option>
+                  <option value="zh-TW">zh-TW (Chinese Traditional)</option>
+                  <option value="ja">ja (Japanese)</option>
+                  <option value="ko">ko (Korean)</option>
+                  <option value="es">es (Spanish)</option>
+                  <option value="fr">fr (French)</option>
+                  <option value="de">de (German)</option>
+                  <option value="en">en (English)</option>
+                </select>
+              </div>
             </div>
 
             <div class="checkbox-row">
               <label class="checkbox-label">
                 <input type="checkbox" id="cli-enable-clip" checked />
                 Include <code>--start</code> / <code>--end</code> clipping
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="cli-enable-bilingual" checked />
+                Bilingual mode (<code>--bilingual</code>)
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="cli-whisper-translate" />
+                Whisper speech→EN (<code>--whisper-translate</code>)
               </label>
               <label class="checkbox-label">
                 <input type="checkbox" id="cli-enable-burn" checked />

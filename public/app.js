@@ -42,8 +42,81 @@
   }
 
   /* ------------------------------------------------------------------------
-     2. Interactive Subtitle Cue & Raw .SRT Workbench
+     2. Interactive Subtitle Cue, Translation & Raw .SRT Workbench
      ------------------------------------------------------------------------ */
+  const demoTranslations = {
+    'zh-CN': {
+      label: 'Chinese (Simplified) • 简体中文',
+      lines: [
+        '大家好，感谢各位参加今天的分享会。',
+        '欢迎深入了解 Apple 神经网络引擎加速技术。',
+        '借助 WhisperKit CoreML，音频编码器和文本解码器均在本地运行。',
+        '您可以在转录视频之前裁剪任意起始和结束时间范围。',
+        '随后即可导出标准双语 .SRT 字幕文件，或将字幕直接烧录至 MP4 视频中。'
+      ]
+    },
+    'zh-TW': {
+      label: 'Chinese (Traditional) • 繁體中文',
+      lines: [
+        '大家好，感謝各位參加今天的分享會。',
+        '歡迎深入了解 Apple 神經網路引擎加速技術。',
+        '透過 WhisperKit CoreML，音訊編碼器與文字解碼器皆在本地運行。',
+        '您可以在轉錄影片之前裁剪任意起始與結束時間範圍。',
+        '隨後即可匯出標準雙語 .SRT 字幕檔，或將字幕直接燒錄至 MP4 影片中。'
+      ]
+    },
+    ja: {
+      label: 'Japanese • 日本語',
+      lines: [
+        '皆さんこんにちは。本日のセッションにご参加いただきありがとうございます。',
+        'Apple Neural Engine アクセラレーションの徹底解説へようこそ。',
+        'WhisperKit CoreML により、AudioEncoder と TextDecoder がローカルで動作します。',
+        '文字起こしの前に、任意の開始・終了範囲をトリミングできます。',
+        'その後、標準の .SRT 書き出しや MP4 への字幕焼き込みが可能です。'
+      ]
+    },
+    es: {
+      label: 'Spanish • Español',
+      lines: [
+        'Hola a todos y gracias por unirse a la sesión de hoy.',
+        'Bienvenidos a nuestro análisis profundo de la aceleración del Apple Neural Engine.',
+        'Con WhisperKit CoreML, AudioEncoder y TextDecoder se ejecutan localmente.',
+        'Puedes recortar cualquier rango de inicio y fin antes de transcribir tu video.',
+        'Luego exporta un archivo .SRT estándar o incrusta subtítulos en MP4.'
+      ]
+    },
+    fr: {
+      label: 'French • Français',
+      lines: [
+        "Bonjour à tous et merci de participer à la session d'aujourd'hui.",
+        "Bienvenue dans notre exploration de l'accélération Apple Neural Engine.",
+        'Avec WhisperKit CoreML, AudioEncoder et TextDecoder tournent en local.',
+        'Vous pouvez découper une plage de début et de fin avant la transcription.',
+        'Puis exportez un fichier .SRT standard ou incrustez les sous-titres en MP4.'
+      ]
+    },
+    de: {
+      label: 'German • Deutsch',
+      lines: [
+        'Hallo zusammen und vielen Dank für Ihre Teilnahme an der heutigen Sitzung.',
+        'Willkommen zu unserem Deep Dive in die Apple Neural Engine-Beschleunigung.',
+        'Mit WhisperKit CoreML laufen AudioEncoder und TextDecoder komplett lokal.',
+        'Sie können vor der Transkription jeden Start- und Endbereich zuschneiden.',
+        'Exportieren Sie dann eine .SRT-Datei oder brennen Sie Untertitel in MP4 ein.'
+      ]
+    },
+    ko: {
+      label: 'Korean • 한국어',
+      lines: [
+        '안녕하세요 여러분, 오늘 세션에 함께해 주셔서 감사합니다.',
+        'Apple Neural Engine 가속 심층 분석에 오신 것을 환영합니다.',
+        'WhisperKit CoreML을 통해 AudioEncoder와 TextDecoder가 로컬에서 실행됩니다.',
+        '전사하기 전에 원하는 시작 및 종료 구간을 클리핑할 수 있습니다.',
+        '그런 다음 표준 .SRT 파일로 내보내거나 MP4에 자막을 직접 번인하세요.'
+      ]
+    }
+  };
+
   const initialCues = [
     {
       id: 1,
@@ -77,7 +150,12 @@
     }
   ];
 
-  let cues = initialCues.map((c) => ({ ...c }));
+  let currentTranslateLang = 'zh-CN';
+  let currentDisplayMode = 'bilingual'; // 'bilingual' | 'translated' | 'original'
+  let cues = initialCues.map((c, i) => ({
+    ...c,
+    translatedText: demoTranslations['zh-CN'].lines[i]
+  }));
   let activeCueIndex = 1; // Default to #2 matching the screenshot
 
   const cueListEl = document.getElementById('demo-cue-list');
@@ -95,6 +173,9 @@
   const btnDemoDownloadSrt = document.getElementById('btn-demo-download-srt');
   const btnDemoBurn = document.getElementById('btn-demo-burn');
   const statusTextEl = document.getElementById('demo-status-text');
+  const demoTranslateSelect = document.getElementById('demo-translate-lang');
+  const btnDemoTranslate = document.getElementById('btn-demo-translate');
+  const displayModeBtns = document.querySelectorAll('[data-display-mode]');
 
   function formatSRTTimestamp(seconds) {
     const clamped = Math.max(0, seconds);
@@ -121,6 +202,18 @@
     return `${pad2(m)}:${pad2(s)}.${tenths}`;
   }
 
+  function formatCueBody(cue) {
+    const orig = (cue.text || '').trim();
+    const trans = (cue.translatedText || '').trim();
+    if (!trans || currentDisplayMode === 'original') {
+      return orig;
+    }
+    if (currentDisplayMode === 'translated') {
+      return trans;
+    }
+    return `${orig}\n${trans}`;
+  }
+
   function formatCuesToSRT(cueArray) {
     return (
       cueArray
@@ -128,7 +221,7 @@
           const seq = idx + 1;
           const start = formatSRTTimestamp(cue.startTime);
           const end = formatSRTTimestamp(cue.endTime);
-          return `${seq}\n${start} --> ${end}\n${cue.text.trim()}`;
+          return `${seq}\n${start} --> ${end}\n${formatCueBody(cue)}`;
         })
         .join('\n\n') + '\n'
     );
@@ -182,14 +275,40 @@
       btn.className = 'cue-item' + (index === activeCueIndex ? ' active' : '');
       btn.id = `demo-cue-item-${cue.id}`;
       const rangeStr = `${formatSRTTimestamp(cue.startTime)} --> ${formatSRTTimestamp(cue.endTime)}`;
+      const hasTrans = Boolean(cue.translatedText && currentDisplayMode !== 'original');
+      const badgeHtml = hasTrans
+        ? `<span class="cue-lang-badge">${currentDisplayMode === 'bilingual' ? 'Bilingual • ' : ''}${currentTranslateLang}</span>`
+        : '';
+
       btn.innerHTML = `
         <div class="cue-item-top">
           <span class="cue-id">#${cue.id}</span>
           <span class="cue-time">${rangeStr}</span>
+          ${badgeHtml}
         </div>
-        <div class="cue-text"></div>
+        <div class="cue-text-container"></div>
       `;
-      btn.querySelector('.cue-text').textContent = cue.text;
+
+      const container = btn.querySelector('.cue-text-container');
+      if (cue.translatedText && currentDisplayMode === 'bilingual') {
+        const origEl = document.createElement('div');
+        origEl.className = 'cue-text-orig';
+        origEl.textContent = cue.text;
+        const transEl = document.createElement('div');
+        transEl.className = 'cue-text-trans';
+        transEl.textContent = cue.translatedText;
+        container.appendChild(origEl);
+        container.appendChild(transEl);
+      } else {
+        const singleEl = document.createElement('div');
+        singleEl.className = 'cue-text';
+        singleEl.textContent =
+          cue.translatedText && currentDisplayMode === 'translated'
+            ? cue.translatedText
+            : cue.text;
+        container.appendChild(singleEl);
+      }
+
       btn.addEventListener('click', () => selectCue(index));
       cueListEl.appendChild(btn);
     });
@@ -204,7 +323,25 @@
     const cue = cues[activeCueIndex] || cues[0];
     if (!cue) return;
     if (captionOverlayEl) {
-      captionOverlayEl.textContent = cue.text;
+      captionOverlayEl.innerHTML = '';
+      if (cue.translatedText && currentDisplayMode === 'bilingual') {
+        const origLine = document.createElement('div');
+        origLine.className = 'burned-subtitle-orig';
+        origLine.textContent = cue.text;
+        const transLine = document.createElement('div');
+        transLine.className = 'burned-subtitle-trans';
+        transLine.textContent = cue.translatedText;
+        captionOverlayEl.appendChild(origLine);
+        captionOverlayEl.appendChild(transLine);
+      } else {
+        const singleLine = document.createElement('div');
+        singleLine.className = 'burned-subtitle-trans';
+        singleLine.textContent =
+          cue.translatedText && currentDisplayMode === 'translated'
+            ? cue.translatedText
+            : cue.text;
+        captionOverlayEl.appendChild(singleLine);
+      }
     }
     const midTime = (cue.startTime + cue.endTime) / 2;
     if (timecodeCurrentEl) {
@@ -215,6 +352,64 @@
       scrubberFillEl.style.width = `${pct.toFixed(1)}%`;
     }
   }
+
+  function applyDemoTranslation(langKey) {
+    const pack = demoTranslations[langKey] || demoTranslations['zh-CN'];
+    currentTranslateLang = langKey;
+    cues = cues.map((cue, idx) => ({
+      ...cue,
+      translatedText: pack.lines[idx] || cue.translatedText || cue.text
+    }));
+    renderCues();
+    if (statusTextEl) {
+      const modeLabel =
+        currentDisplayMode === 'bilingual'
+          ? 'Bilingual'
+          : currentDisplayMode === 'translated'
+          ? 'Translated Only'
+          : 'Original Only';
+      statusTextEl.textContent = `🌐 Translated ${cues.length} subtitle cues to ${pack.label} (${modeLabel}).`;
+    }
+  }
+
+  if (demoTranslateSelect) {
+    demoTranslateSelect.addEventListener('change', () => {
+      applyDemoTranslation(demoTranslateSelect.value);
+    });
+  }
+
+  if (btnDemoTranslate) {
+    btnDemoTranslate.addEventListener('click', () => {
+      const langKey = demoTranslateSelect ? demoTranslateSelect.value : 'zh-CN';
+      if (currentDisplayMode === 'original') {
+        currentDisplayMode = 'bilingual';
+        displayModeBtns.forEach((b) => {
+          b.classList.toggle('active', b.getAttribute('data-display-mode') === 'bilingual');
+        });
+      }
+      applyDemoTranslation(langKey);
+    });
+  }
+
+  displayModeBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const mode = btn.getAttribute('data-display-mode');
+      if (!mode) return;
+      currentDisplayMode = mode;
+      displayModeBtns.forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderCues();
+      if (statusTextEl) {
+        const modeLabel =
+          mode === 'bilingual'
+            ? 'Bilingual (Original + Translated)'
+            : mode === 'translated'
+            ? 'Translated Only'
+            : 'Original Only';
+        statusTextEl.textContent = `👁️ Switched subtitle display & export mode to ${modeLabel}.`;
+      }
+    });
+  });
 
   function selectCue(index) {
     activeCueIndex = Math.max(0, Math.min(cues.length - 1, index));
@@ -436,7 +631,10 @@
   const cliSrtOut = document.getElementById('cli-srt-out');
   const cliBurnOut = document.getElementById('cli-burn-out');
   const cliModelSelect = document.getElementById('cli-model-select');
+  const cliTranslateSelect = document.getElementById('cli-translate-select');
   const cliEnableClip = document.getElementById('cli-enable-clip');
+  const cliEnableBilingual = document.getElementById('cli-enable-bilingual');
+  const cliWhisperTranslate = document.getElementById('cli-whisper-translate');
   const cliEnableBurn = document.getElementById('cli-enable-burn');
   const cliBurnOnly = document.getElementById('cli-burn-only');
   const cliCommandOutput = document.getElementById('cli-command-output');
@@ -451,12 +649,26 @@
     const srtVal = (cliSrtOut.value || 'output.srt').trim();
     const burnVal = (cliBurnOut.value || 'output_subtitled.mp4').trim();
     const modelVal = cliModelSelect.value;
+    const translateVal = cliTranslateSelect ? cliTranslateSelect.value : '';
+    const isBilingual = cliEnableBilingual ? cliEnableBilingual.checked : false;
+    const isWhisperTranslate = cliWhisperTranslate ? cliWhisperTranslate.checked : false;
 
     const parts = ['./WhisperSub.app/Contents/MacOS/WhisperSub', '--cli', inputPath];
 
     if (cliEnableClip.checked) {
       if (startVal) parts.push('--start', startVal);
       if (endVal) parts.push('--end', endVal);
+    }
+
+    if (translateVal) {
+      parts.push('--translate', translateVal);
+      if (isBilingual) {
+        parts.push('--bilingual');
+      }
+    }
+
+    if (isWhisperTranslate) {
+      parts.push('--whisper-translate');
     }
 
     if (srtVal) {
@@ -477,6 +689,8 @@
 
     cliCommandOutput.textContent = parts.join(' ');
 
+    const modeDesc = translateVal ? (isBilingual ? 'Bilingual' : 'Translated Only') : 'Original Only';
+
     // Update simulated CLI stdout log
     const logs = [];
     logs.push(`<div>🎬 Inspecting video: ${inputPath}</div>`);
@@ -490,12 +704,22 @@
       logs.push(`<div>📝 Loaded 18 existing subtitle segment(s) from: ${srtVal}</div>`);
     } else {
       const mId = modelVal || 'openai_whisper-base';
-      logs.push(`<div>🧠 Transcribing on Apple Neural Engine using ${mId}...</div>`);
+      if (isWhisperTranslate && (!translateVal || translateVal === 'en') && !isBilingual) {
+        logs.push(`<div>🧠 Translating speech → English on Apple Neural Engine using ${mId}...</div>`);
+      } else {
+        logs.push(`<div>🧠 Transcribing on Apple Neural Engine using ${mId}...</div>`);
+      }
       logs.push(`<div>✅ Transcribed 18 subtitle segment(s).</div>`);
-      logs.push(`<div>📝 Saved .SRT file to: ${srtVal}</div>`);
+    }
+    if (translateVal && !(isWhisperTranslate && translateVal === 'en' && !isBilingual)) {
+      logs.push(`<div>🌐 Translating 18 subtitle segment(s) to ${translateVal} (${modeDesc})...</div>`);
+      logs.push(`<div>✅ Translated 18 subtitle segment(s) to ${translateVal}.</div>`);
+    }
+    if (!cliBurnOnly.checked || translateVal) {
+      logs.push(`<div>📝 Saved .SRT file (${modeDesc}) to: ${srtVal}</div>`);
     }
     if (cliEnableBurn.checked && burnVal) {
-      logs.push(`<div>🔥 Burning subtitles into video: ${burnVal}</div>`);
+      logs.push(`<div>🔥 Burning subtitles (${modeDesc}) into video: ${burnVal}</div>`);
       logs.push(`<div>✅ Exported burned video to: ${burnVal}</div>`);
     }
     if (cliTerminalLog) {
@@ -510,7 +734,10 @@
     cliSrtOut,
     cliBurnOut,
     cliModelSelect,
+    cliTranslateSelect,
     cliEnableClip,
+    cliEnableBilingual,
+    cliWhisperTranslate,
     cliEnableBurn,
     cliBurnOnly
   ].forEach((el) => {
@@ -519,6 +746,8 @@
       el.addEventListener('change', updateCliBuilder);
     }
   });
+
+  updateCliBuilder();
 
   if (btnCopyCli) {
     btnCopyCli.addEventListener('click', async () => {
