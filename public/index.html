@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>WhisperSub — AI Video Subtitles on Apple Neural Engine for macOS</title>
-  <meta name="description" content="WhisperSub is a native macOS 14+ app that transcribes video using OpenAI Whisper on the Apple Neural Engine via WhisperKit CoreML, exports standard .SRT files, and burns styled captions into MP4 video." />
-  <meta property="og:title" content="WhisperSub — AI Video Subtitles on Apple Neural Engine" />
-  <meta property="og:description" content="Native SwiftUI macOS app & CLI that transcribes videos locally on the Apple Neural Engine, generates .SRT subtitle files, and burns captions directly into MP4." />
+  <title>WhisperSub — AI Video Subtitles &amp; Gemma 4 Review on Apple Neural Engine</title>
+  <meta name="description" content="WhisperSub is a native macOS 14+ app that transcribes video using OpenAI Whisper on the Apple Neural Engine via WhisperKit CoreML, translates into 18+ languages, polishes translations with Gemma 4 E4B on ANE, supports inline subtitle editing, and burns styled captions into MP4 video." />
+  <meta property="og:title" content="WhisperSub — AI Video Subtitles &amp; Gemma 4 Review on Apple Neural Engine" />
+  <meta property="og:description" content="Native SwiftUI macOS app &amp; CLI that transcribes videos locally on the Apple Neural Engine, translates &amp; refines with Gemma 4 E4B CoreML, enables live inline editing, and burns captions directly into MP4." />
   <meta property="og:image" content="assets/screenshot-workspace.png" />
   <meta property="og:type" content="website" />
   <link rel="icon" type="image/png" href="assets/icon.png" />
@@ -59,20 +59,20 @@
             <div class="hero-identity">
               <img src="assets/icon.png" alt="WhisperSub macOS App Icon" class="hero-app-icon" width="68" height="68" />
               <div class="hero-meta-stack">
-                <span class="hero-kicker">Apple Neural Engine • WhisperKit CoreML</span>
+                <span class="hero-kicker">Apple Neural Engine • WhisperKit + Gemma 4 CoreML</span>
                 <span class="hero-reqs">Native Swift 6 &amp; SwiftUI • macOS Sonoma 14.0+ • 100% On-Device</span>
               </div>
             </div>
 
-            <h1>AI Video Subtitles on the Apple Neural Engine.</h1>
+            <h1>AI Video Subtitles &amp; Gemma 4 Review on the Apple Neural Engine.</h1>
 
             <p class="hero-subtitle">
-              WhisperSub is a native macOS application and headless CLI that transcribes videos locally using OpenAI Whisper on Apple Silicon, translates subtitles into 18+ languages with bilingual or translated-only modes, formats clean <code>.srt</code> subtitle cues, and burns crisp captions directly into <code>.mp4</code> video via hardware-accelerated <code>AVFoundation</code> and <code>CoreImage</code>.
+              WhisperSub is a native macOS application and headless CLI that transcribes videos locally using OpenAI Whisper on Apple Silicon, translates subtitles into 18+ languages, contextually reviews and polishes translations using <strong>Gemma 4 E4B on the Apple Neural Engine</strong> (via <code>CoreMLLLM</code>), supports live inline cue &amp; timestamp editing, and burns crisp single-language or bilingual captions directly into <code>.mp4</code> video.
             </p>
 
             <div class="hero-cta-row">
               <a href="downloads/WhisperSub-macOS-arm64.zip" download="WhisperSub-macOS-arm64.zip" class="btn btn-primary btn-lg" id="hero-cta-download">
-                ⬇ Download for macOS (Apple Silicon • 3.6 MB)
+                ⬇ Download for macOS (Apple Silicon • 4.9 MB)
               </a>
               <a href="https://github.com/windmaple/WhisperSub" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-lg" id="hero-cta-github">
                 View on GitHub
@@ -95,16 +95,16 @@
                 <span class="spec-value">.cpuAndNeuralEngine</span>
               </div>
               <div class="spec-row">
-                <span class="spec-label">Mel Spectrogram Compute</span>
-                <span class="spec-value">.cpuAndGPU</span>
+                <span class="spec-label">Gemma 4 E4B / E2B Review</span>
+                <span class="spec-value">CoreMLLLM • .cpuAndNeuralEngine</span>
               </div>
               <div class="spec-row">
                 <span class="spec-label">Video Subtitle Compositor</span>
-                <span class="spec-value">AVFoundation + CoreImage</span>
+                <span class="spec-value">AVFoundation + VideoToolbox</span>
               </div>
               <div class="spec-row">
-                <span class="spec-label">Subtitle Translation</span>
-                <span class="spec-value">18+ Languages • Bilingual / Single</span>
+                <span class="spec-label">Subtitle Translation &amp; Editor</span>
+                <span class="spec-value">18+ Languages • Live Inline Edit</span>
               </div>
               <div class="spec-row">
                 <span class="spec-label">Supported Input Containers</span>
@@ -115,8 +115,8 @@
                 <span class="spec-value">~/Library/Application Support/WhisperSub</span>
               </div>
               <div class="spec-row">
-                <span class="spec-label">Caption Readability Split</span>
-                <span class="spec-value">≤ 88 chars • VAD Chunking</span>
+                <span class="spec-label">Working Copy Sync</span>
+                <span class="spec-value">Real-Time Multi-SRT Auto-Save</span>
               </div>
             </div>
           </aside>
@@ -164,14 +164,14 @@
               <p class="annotation-text">Select from Tiny, Base, Small, or Large v3 Turbo and clip any <code>Start</code> to <code>End</code> timestamp before transcribing.</p>
             </div>
             <div class="annotation-item">
-              <div class="annotation-step">02 • MULTI-LANGUAGE TRANSLATION</div>
-              <div class="annotation-title">18+ Languages &amp; Bilingual Inspector</div>
-              <p class="annotation-text">Translate cues with one click (<code>⌘L</code>) and toggle between <strong>Bilingual (Original + Translated)</strong>, <strong>Translated Only</strong>, and <strong>Original Only</strong>.</p>
+              <div class="annotation-step">02 • TRANSLATE &amp; GEMMA 4 ANE REVIEW</div>
+              <div class="annotation-title">18+ Languages &amp; Gemma 4 E4B Polish</div>
+              <p class="annotation-text">Translate cues (<code>⌘L</code>), refine phrasing and terminology on the Apple Neural Engine with <strong>Gemma 4 E4B CoreML</strong> (<code>⇧⌘L</code>), and edit any cue inline.</p>
             </div>
             <div class="annotation-item">
               <div class="annotation-step">03 • HARDWARE COMPOSITOR</div>
-              <div class="annotation-title">Bilingual &amp; Translated MP4 Burn-In</div>
-              <p class="annotation-text">Render stacked two-line bilingual captions or translated-only subtitles directly into the video track using native <code>AVFoundation</code> &amp; <code>CoreImage</code>.</p>
+              <div class="annotation-title">Bilingual &amp; 4K WebM/MP4 Burn-In</div>
+              <p class="annotation-text">Render stacked two-line bilingual captions or translated-only subtitles directly into MP4 or 4K WebM/AV1 video via <code>AVFoundation</code> &amp; <code>VideoToolbox</code>.</p>
             </div>
           </div>
         </div>
@@ -183,9 +183,9 @@
       <div class="container">
         <div class="section-header">
           <span class="section-eyebrow">Interactive Preview</span>
-          <h2 class="section-title">Test the Subtitle Translation, Bilingual Overlay &amp; .SRT Inspector</h2>
+          <h2 class="section-title">Test Translation, Gemma 4 ANE Review, Bilingual Overlay &amp; Live .SRT Editor</h2>
           <p class="section-desc">
-            Translate demo cues into <strong>Simplified/Traditional Chinese, Japanese, Spanish, French, German, or Korean</strong>, toggle between <strong>Bilingual</strong> and <strong>Translated Only</strong> modes, and preview how stacked captions look on the video player and inside the <code>.srt</code> inspector.
+            Translate demo cues into <strong>Simplified/Traditional Chinese, Japanese, Spanish, French, German, or Korean</strong>, polish translations with <strong>Gemma 4 E4B (ANE)</strong>, toggle between <strong>Bilingual</strong> and <strong>Translated Only</strong> modes, and edit cues live in the inspector.
           </p>
         </div>
 
@@ -250,6 +250,9 @@
                   </select>
                   <button type="button" class="btn btn-primary btn-sm" id="btn-demo-translate">
                     Translate (⌘L)
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-demo-gemma-review" title="Simulate contextual subtitle review with Gemma 4 E4B on Apple Neural Engine">
+                    ✨ Gemma 4 Review (⇧⌘L)
                   </button>
                 </div>
                 <div class="translation-bar-row">
@@ -363,14 +366,14 @@
             <div>
               <div class="step-num-row">
                 <span class="step-number">STEP 03</span>
-                <span class="step-shortcut">⌘T / ⌘L / ⌘S</span>
+                <span class="step-shortcut">⌘T / ⌘L / ⇧⌘L</span>
               </div>
-              <h3 class="step-heading">Transcribe, Translate &amp; Save .SRT</h3>
+              <h3 class="step-heading">Transcribe, Translate &amp; Gemma 4 Review</h3>
               <p class="step-body">
-                Extracts 16 kHz mono WAV audio, auto-detects spoken language, translates subtitles into 18+ target languages, and exports <strong>Bilingual</strong> or <strong>Translated-Only</strong> <code>.srt</code> files.
+                Streams transcribed cues live on the Apple Neural Engine, translates into 18+ languages, polishes translations contextually with <strong>Gemma 4 E4B CoreML</strong>, and supports inline cue &amp; timestamp editing with real-time multi-SRT auto-sync.
               </p>
             </div>
-            <div class="step-tech-tag">WhisperKit CoreML • Neural Translation</div>
+            <div class="step-tech-tag">WhisperKit + Gemma 4 CoreML (ANE)</div>
           </article>
 
           <article class="pipeline-step">
@@ -381,10 +384,10 @@
               </div>
               <h3 class="step-heading">Burn Bilingual or Translated MP4</h3>
               <p class="step-body">
-                Composites high-contrast single-line or stacked two-line bilingual subtitle overlays frame-by-frame onto the video track with real-time progress reporting.
+                Composites high-contrast single-line or stacked two-line bilingual subtitle overlays onto <code>.mp4</code>, <code>.mov</code>, or 4K <code>.webm</code>/<code>.mkv</code> video tracks with hardware-accelerated encoding.
               </p>
             </div>
-            <div class="step-tech-tag">AVVideoComposition • CoreImage</div>
+            <div class="step-tech-tag">AVVideoComposition • VideoToolbox</div>
           </article>
         </div>
       </div>
@@ -491,6 +494,11 @@
                   <td>.cpuOnly</td>
                 </tr>
                 <tr>
+                  <td>Gemma 4 Subtitle Review LLM</td>
+                  <td><code>Gemma 4 E4B / E2B (.mlmodelc)</code></td>
+                  <td>.cpuAndNeuralEngine</td>
+                </tr>
+                <tr>
                   <td>Recommended Use Case</td>
                   <td colspan="2" id="selected-model-usecase">Everyday lectures, demos, and rapid .SRT generation</td>
                 </tr>
@@ -577,6 +585,10 @@
                 Bilingual mode (<code>--bilingual</code>)
               </label>
               <label class="checkbox-label">
+                <input type="checkbox" id="cli-gemma-review" checked />
+                Gemma 4 ANE review (<code>--gemma-review</code>)
+              </label>
+              <label class="checkbox-label">
                 <input type="checkbox" id="cli-whisper-translate" />
                 Whisper speech→EN (<code>--whisper-translate</code>)
               </label>
@@ -633,10 +645,10 @@
         <div class="build-grid">
           <div class="code-panel">
             <h3>Pre-Built macOS Binary (arm64) &amp; Source Build</h3>
-            <p>Download <code>WhisperSub-macOS-arm64.zip</code> (3.6 MB, v1.1.0, macOS 14.0+ Apple Silicon), or build from source via <code>./build_app.sh</code>.</p>
+            <p>Download <code>WhisperSub-macOS-arm64.zip</code> (4.9 MB, v1.2.0, macOS 14.0+ Apple Silicon), or build from source via <code>./build_app.sh</code>.</p>
             <div style="margin-bottom: 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
               <a href="downloads/WhisperSub-macOS-arm64.zip" download="WhisperSub-macOS-arm64.zip" class="btn btn-primary" id="build-btn-download">
-                ⬇ Download WhisperSub.app (3.6 MB .zip)
+                ⬇ Download WhisperSub.app (4.9 MB .zip)
               </a>
               <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-build">
                 Copy Commands
@@ -651,7 +663,7 @@ open WhisperSub.app
 git clone https://github.com/windmaple/WhisperSub.git
 cd WhisperSub &amp;&amp; ./build_app.sh &amp;&amp; open WhisperSub.app</code></pre>
             <div style="margin-top: 10px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted-dark); word-break: break-all;">
-              SHA-256: 8cbaa5e2a4e9b30331eddb87188b6fe434c7e0ef4501b101bb9fa6c892bc0bf6
+              SHA-256: 6952d882df7b8101086e944ccdb7c48d609e946ae18da21cc686eb4f13cac2a8
             </div>
           </div>
 
@@ -679,6 +691,10 @@ cd WhisperSub &amp;&amp; ./build_app.sh &amp;&amp; open WhisperSub.app</code></p
                 <tr>
                   <td>Translate Subtitles</td>
                   <td><kbd>⌘</kbd> <kbd>L</kbd></td>
+                </tr>
+                <tr>
+                  <td>Review &amp; Revise with Gemma 4 (ANE)</td>
+                  <td><kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>L</kbd></td>
                 </tr>
                 <tr>
                   <td>Save <code>.SRT</code> Subtitle File…</td>

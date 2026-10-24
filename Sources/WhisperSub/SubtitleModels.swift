@@ -78,19 +78,23 @@ public struct TranslationLanguage: Identifiable, Equatable, Hashable, Sendable {
     }
 }
 
-public struct SubtitleCue: Identifiable, Equatable, Hashable, Sendable {
+public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable {
     public let id: Int
     public var startTime: TimeInterval
     public var endTime: TimeInterval
     public var text: String
     public var translatedText: String?
+    public var preReviewTranslatedText: String?
+    public var isReviewedByGemma: Bool
 
     public init(
         id: Int,
         startTime: TimeInterval,
         endTime: TimeInterval,
         text: String,
-        translatedText: String? = nil
+        translatedText: String? = nil,
+        preReviewTranslatedText: String? = nil,
+        isReviewedByGemma: Bool = false
     ) {
         self.id = id
         self.startTime = max(0, startTime)
@@ -98,6 +102,9 @@ public struct SubtitleCue: Identifiable, Equatable, Hashable, Sendable {
         self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedTranslation = translatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.translatedText = (trimmedTranslation?.isEmpty == false) ? trimmedTranslation : nil
+        let trimmedPreReview = preReviewTranslatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.preReviewTranslatedText = (trimmedPreReview?.isEmpty == false) ? trimmedPreReview : nil
+        self.isReviewedByGemma = isReviewedByGemma
     }
 
     public var hasTranslation: Bool {
@@ -105,6 +112,18 @@ public struct SubtitleCue: Identifiable, Equatable, Hashable, Sendable {
             return false
         }
         return !t.isEmpty
+    }
+
+    public var wasRevisedByGemma: Bool {
+        guard isReviewedByGemma,
+              let pre = preReviewTranslatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let cur = translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !pre.isEmpty,
+              !cur.isEmpty
+        else {
+            return false
+        }
+        return pre != cur
     }
 
     public func displayText(for mode: SubtitleDisplayMode) -> String {
@@ -118,7 +137,7 @@ public struct SubtitleCue: Identifiable, Equatable, Hashable, Sendable {
         case .translatedOnly:
             return translated
         case .bilingual:
-            if translated == text {
+            if translated == text || text.hasSuffix("\n" + translated) {
                 return text
             }
             return "\(text)\n\(translated)"
@@ -131,6 +150,51 @@ public struct SubtitleCue: Identifiable, Equatable, Hashable, Sendable {
 
     public var shortTimeRange: String {
         "\(SRTFormatter.formatShortTimestamp(startTime)) – \(SRTFormatter.formatShortTimestamp(endTime))"
+    }
+}
+
+public struct GemmaModelOption: Identifiable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let displayName: String
+    public let shortName: String
+    public let sizeDescription: String
+    public let repoID: String
+
+    public static let availableModels: [GemmaModelOption] = [
+        GemmaModelOption(
+            id: "gemma-4-e4b-ane",
+            displayName: "Gemma 4 E4B (CoreML • ANE)",
+            shortName: "Gemma 4 E4B (ANE)",
+            sizeDescription: "~5.5 GB • Apple Neural Engine",
+            repoID: "mlboydaisuke/gemma-4-E4B-coreml"
+        ),
+        GemmaModelOption(
+            id: "gemma-4-e2b-ane",
+            displayName: "Gemma 4 E2B (CoreML • ANE)",
+            shortName: "Gemma 4 E2B (ANE)",
+            sizeDescription: "~4.4 GB • Fast Apple Neural Engine",
+            repoID: "mlboydaisuke/gemma-4-E2B-coreml"
+        )
+    ]
+
+    public static let defaultModel = availableModels[0] // Gemma 4 E4B (CoreML • ANE)
+
+    public static func resolve(_ query: String) -> GemmaModelOption? {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+        if let exact = availableModels.first(where: {
+            $0.id.lowercased() == normalized ||
+            $0.repoID.lowercased() == normalized
+        }) {
+            return exact
+        }
+        if normalized.contains("e2b") {
+            return availableModels.first { $0.id == "gemma-4-e2b-ane" }
+        }
+        if normalized.contains("e4b") || normalized.contains("ane") || normalized.contains("coreml") {
+            return availableModels.first { $0.id == "gemma-4-e4b-ane" }
+        }
+        return nil
     }
 }
 
@@ -221,7 +285,7 @@ public enum SRTFormatter {
                 startTime: cue.startTime,
                 endTime: cue.endTime,
                 text: cue.displayText(for: displayMode),
-                translatedText: cue.translatedText
+                translatedText: nil
             )
         }
     }

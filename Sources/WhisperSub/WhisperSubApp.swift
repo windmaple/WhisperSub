@@ -23,7 +23,7 @@ struct WhisperSubMain {
     @MainActor
     private static func runCLIMode(args: [String]) async {
         guard let inputPath = args.first else {
-            fputs("Usage: WhisperSub --cli <input-video> [--start <time>] [--end <time>] [--clip-out <clip.mp4>] [--translate <lang>] [--bilingual] [--whisper-translate] [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
+            fputs("Usage: WhisperSub --cli <input-video> [--start <time>] [--end <time>] [--clip-out <clip.mp4>] [--translate <lang>] [--bilingual] [--whisper-translate] [--gemma-review] [--gemma-model <e4b|e2b>] [--gemma-prompt <notes>] [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
             exit(1)
         }
 
@@ -37,6 +37,9 @@ struct WhisperSubMain {
         var translateLangArg: String?
         var bilingualMode = false
         var whisperDirectTranslate = false
+        var gemmaReviewEnabled = false
+        var gemmaModelOption = GemmaModelOption.defaultModel
+        var gemmaCustomPrompt = ""
         var modelOption = WhisperModelOption.defaultModel
         var burnOnly = false
 
@@ -67,6 +70,22 @@ struct WhisperSubMain {
                 bilingualMode = true
             case "--whisper-translate":
                 whisperDirectTranslate = true
+            case "--gemma-review":
+                gemmaReviewEnabled = true
+            case "--gemma-model":
+                gemmaReviewEnabled = true
+                if i + 1 < args.count {
+                    if let resolved = GemmaModelOption.resolve(args[i + 1]) {
+                        gemmaModelOption = resolved
+                    }
+                    i += 1
+                }
+            case "--gemma-prompt":
+                gemmaReviewEnabled = true
+                if i + 1 < args.count {
+                    gemmaCustomPrompt = args[i + 1]
+                    i += 1
+                }
             case "--srt":
                 if i + 1 < args.count {
                     srtOutURL = URL(fileURLWithPath: args[i + 1])
@@ -159,7 +178,8 @@ struct WhisperSubMain {
                 print("✅ Transcribed \(cues.count) subtitle segment(s).")
             }
 
-            if let rawLang = translateLangArg {
+            let effectiveTranslateLang = translateLangArg ?? (gemmaReviewEnabled ? TranslationLanguage.defaultLanguage.id : nil)
+            if let rawLang = effectiveTranslateLang {
                 let targetLang = TranslationLanguage.resolve(rawLang)
                     ?? TranslationLanguage(id: rawLang, displayName: rawLang, nativeName: rawLang)
                 let directAudioTranslate = whisperDirectTranslate && !bilingualMode && targetLang.id.lowercased() == "en" && !burnOnly
@@ -169,6 +189,20 @@ struct WhisperSubMain {
                     cues = try await translator.translateCues(cues, to: targetLang)
                     print("✅ Translated \(cues.count) subtitle segment(s) to \(targetLang.displayName).")
                 }
+
+                if gemmaReviewEnabled {
+                    print("✨ Reviewing & revising \(cues.count) subtitle translation(s) with \(gemmaModelOption.displayName)...")
+                    let reviewer = GemmaReviewService()
+                    let reviewResult = try await reviewer.reviewAndReviseCues(
+                        cues,
+                        targetLanguage: targetLang,
+                        modelOption: gemmaModelOption,
+                        customInstructions: gemmaCustomPrompt
+                    )
+                    cues = reviewResult.cues
+                    print("✅ \(gemmaModelOption.shortName) reviewed \(cues.count) cues and revised \(reviewResult.revisedCount) segment(s).")
+                }
+
                 if !explicitSRT && !burnOnly {
                     let base = inputURL.deletingPathExtension()
                     let suffix = bilingualMode ? "bilingual_\(targetLang.id)" : targetLang.id
@@ -176,7 +210,7 @@ struct WhisperSubMain {
                 }
             }
 
-            if !burnOnly || translateLangArg != nil {
+            if !burnOnly || effectiveTranslateLang != nil {
                 let srtContent = SRTFormatter.format(cues: cues, displayMode: displayMode)
                 try srtContent.write(to: srtOutURL, atomically: true, encoding: .utf8)
                 print("📝 Saved .SRT file (\(displayMode.compactLabel)) to: \(srtOutURL.path)")
@@ -216,8 +250,7 @@ struct WhisperSubGUIApp: App {
                         if let burnedPath = args.dropFirst().first(where: { !$0.hasPrefix("-") && $0.hasSuffix(".mp4") }),
                            FileManager.default.fileExists(atPath: burnedPath) {
                             let burnedURL = URL(fileURLWithPath: burnedPath)
-                            viewModel.lastBurnedVideoURL = burnedURL
-                            viewModel.player = AVPlayer(url: burnedURL)
+                            viewModel.attachBurnedPreviewPlayer(url: burnedURL)
                         }
                         if args.contains("--auto-transcribe") {
                             viewModel.transcribeCurrentVideo()
@@ -257,6 +290,12 @@ struct WhisperSubGUIApp: App {
                     viewModel.translateCurrentSubtitles()
                 }
                 .keyboardShortcut("l", modifiers: [.command])
+                .disabled(viewModel.cues.isEmpty || viewModel.isBusy)
+
+                Button("Review & Revise with Gemma 4") {
+                    viewModel.reviewSubtitlesWithGemma()
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
                 .disabled(viewModel.cues.isEmpty || viewModel.isBusy)
 
                 Button("Save .SRT File…") {

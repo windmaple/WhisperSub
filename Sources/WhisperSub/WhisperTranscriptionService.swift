@@ -20,6 +20,12 @@ public final class WhisperTranscriptionService: ObservableObject {
 
     private var whisperKit: WhisperKit?
     private let storageBaseURL: URL
+    nonisolated(unsafe) private var isCancelled: Bool = false
+
+    public func cancel() {
+        isCancelled = true
+        state = .idle
+    }
 
     public init() {
         // Ensure HubApi always uses huggingface.co directly instead of an environment mirror
@@ -198,10 +204,16 @@ public final class WhisperTranscriptionService: ObservableObject {
     public func transcribeVideo(
         videoURL: URL,
         modelOption: WhisperModelOption,
-        translateToEnglish: Bool = false
+        translateToEnglish: Bool = false,
+        onPartialCues: (@Sendable ([SubtitleCue]) -> Void)? = nil
     ) async throws -> [SubtitleCue] {
+        isCancelled = false
         do {
+            try Task.checkCancellation()
             try await prepareModel(modelOption)
+            try Task.checkCancellation()
+            if isCancelled { throw CancellationError() }
+
             guard let pipe = whisperKit else {
                 throw NSError(domain: "WhisperSub", code: 1, userInfo: [
                     NSLocalizedDescriptionKey: "WhisperKit failed to initialize."
@@ -216,16 +228,53 @@ public final class WhisperTranscriptionService: ObservableObject {
                 }
             }
 
+            try Task.checkCancellation()
+            if isCancelled { throw CancellationError() }
+
             state = .transcribing(liveText: "Detecting spoken language on Apple Neural Engine…")
 
             nonisolated(unsafe) let unsafePipe = pipe
+            let segmentLock = NSLock()
+            nonisolated(unsafe) var discoveredSegments: [TranscriptionSegment] = []
+
+            unsafePipe.segmentDiscoveryCallback = { [weak self] newSegments in
+                guard let self, !self.isCancelled, !Task.isCancelled else { return }
+                let adjusted: [TranscriptionSegment] = newSegments.map { seg in
+                    let seekTime = Float(seg.seek) / Float(WhisperKit.sampleRate)
+                    // In VAD chunked mode, seg.seek holds the chunk's sample offset while seg.start is chunk-relative (0..<30s).
+                    if seekTime > 0 && seg.start < 31.0 && seg.start + 0.5 < seekTime {
+                        return TranscriptionUtilities.updateSegmentTimings(segment: seg, seekTime: seekTime)
+                    }
+                    return seg
+                }
+                segmentLock.lock()
+                discoveredSegments.append(contentsOf: adjusted)
+                let snapshot = discoveredSegments
+                segmentLock.unlock()
+
+                let partialCues = Self.buildSubtitleCues(fromSegments: snapshot)
+                if !partialCues.isEmpty {
+                    onPartialCues?(partialCues)
+                }
+            }
+            defer {
+                unsafePipe.segmentDiscoveryCallback = nil
+            }
+
             let results: [TranscriptionResult] = try await Task.detached { [weak self] in
+                try Task.checkCancellation()
+                if self?.isCancelled == true { throw CancellationError() }
+
                 let detectedLanguage = (try? await unsafePipe.detectLanguage(audioPath: audioURL.path))?.language
+                try Task.checkCancellation()
+                if self?.isCancelled == true { throw CancellationError() }
+
                 await MainActor.run { [weak self] in
+                    guard let self, !self.isCancelled else { return }
                     if translateToEnglish {
-                        self?.state = .transcribing(liveText: "Translating speech (\(detectedLanguage ?? "auto") → en) on Apple Neural Engine…")
+                        self.state = .transcribing(liveText: "Translating speech (\(detectedLanguage ?? "auto") → en) on Apple Neural Engine…")
                     } else {
-                        self?.state = .transcribing(liveText: "Listening and decoding (\(detectedLanguage ?? "auto")) on Apple Neural Engine…")
+                        self.state = .transcribing(liveText: "Listening and decoding (\(detectedLanguage ?? "auto")) on Apple Neural Engine…")
                     }
                 }
 
@@ -249,10 +298,14 @@ public final class WhisperTranscriptionService: ObservableObject {
                     audioPath: audioURL.path,
                     decodeOptions: decodeOptions,
                     callback: { progress in
+                        if Task.isCancelled || self?.isCancelled == true {
+                            return false
+                        }
                         let cleaned = SRTFormatter.cleanWhisperText(progress.text)
                         if !cleaned.isEmpty {
                             Task { @MainActor [weak self] in
-                                self?.state = .transcribing(liveText: cleaned)
+                                guard let self, !self.isCancelled else { return }
+                                self.state = .transcribing(liveText: cleaned)
                             }
                         }
                         return nil
@@ -260,20 +313,30 @@ public final class WhisperTranscriptionService: ObservableObject {
                 )
             }.value
 
+            try Task.checkCancellation()
+            if isCancelled { throw CancellationError() }
+
             let cues = Self.buildSubtitleCues(from: results)
             let speedFactor = results.first?.timings.speedFactor ?? 0.0
             state = .completed(cueCount: cues.count, speedFactor: speedFactor)
             return cues
         } catch {
+            if error is CancellationError || Task.isCancelled || isCancelled {
+                state = .idle
+                throw CancellationError()
+            }
             state = .failed(error.localizedDescription)
             throw error
         }
     }
 
     /// Converts WhisperKit `TranscriptionResult` segments into clean, well-timed `SubtitleCue`s.
-    private static func buildSubtitleCues(from results: [TranscriptionResult]) -> [SubtitleCue] {
-        let allSegments = results.flatMap { $0.segments }
-            .sorted { $0.start < $1.start }
+    nonisolated private static func buildSubtitleCues(from results: [TranscriptionResult]) -> [SubtitleCue] {
+        buildSubtitleCues(fromSegments: results.flatMap { $0.segments })
+    }
+
+    nonisolated private static func buildSubtitleCues(fromSegments segments: [TranscriptionSegment]) -> [SubtitleCue] {
+        let allSegments = segments.sorted { $0.start < $1.start }
 
         var rawCues: [SubtitleCue] = []
 
@@ -300,7 +363,7 @@ public final class WhisperTranscriptionService: ObservableObject {
         return rawCues
     }
 
-    private static func splitLongCaption(
+    nonisolated private static func splitLongCaption(
         text: String,
         start: TimeInterval,
         end: TimeInterval,

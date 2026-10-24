@@ -175,6 +175,7 @@
   const statusTextEl = document.getElementById('demo-status-text');
   const demoTranslateSelect = document.getElementById('demo-translate-lang');
   const btnDemoTranslate = document.getElementById('btn-demo-translate');
+  const btnDemoGemmaReview = document.getElementById('btn-demo-gemma-review');
   const displayModeBtns = document.querySelectorAll('[data-display-mode]');
 
   function formatSRTTimestamp(seconds) {
@@ -276,8 +277,9 @@
       btn.id = `demo-cue-item-${cue.id}`;
       const rangeStr = `${formatSRTTimestamp(cue.startTime)} --> ${formatSRTTimestamp(cue.endTime)}`;
       const hasTrans = Boolean(cue.translatedText && currentDisplayMode !== 'original');
+      const gemmaTag = cue.gemmaRevised ? ' • ✨ Gemma Revised' : '';
       const badgeHtml = hasTrans
-        ? `<span class="cue-lang-badge">${currentDisplayMode === 'bilingual' ? 'Bilingual • ' : ''}${currentTranslateLang}</span>`
+        ? `<span class="cue-lang-badge">${currentDisplayMode === 'bilingual' ? 'Bilingual • ' : ''}${currentTranslateLang}${gemmaTag}</span>`
         : '';
 
       btn.innerHTML = `
@@ -388,6 +390,24 @@
         });
       }
       applyDemoTranslation(langKey);
+    });
+  }
+
+  if (btnDemoGemmaReview) {
+    btnDemoGemmaReview.addEventListener('click', () => {
+      if (statusTextEl) {
+        statusTextEl.textContent = '✨ Reviewing & polishing subtitle cues on Apple Neural Engine with Gemma 4 E4B CoreML…';
+      }
+      setTimeout(() => {
+        cues = cues.map((cue) => ({
+          ...cue,
+          gemmaRevised: true
+        }));
+        renderCues();
+        if (statusTextEl) {
+          statusTextEl.textContent = `✨ Gemma 4 E4B (ANE) reviewed and polished ${cues.length} subtitle cues and auto-synced working .SRT files.`;
+        }
+      }, 450);
     });
   }
 
@@ -634,6 +654,7 @@
   const cliTranslateSelect = document.getElementById('cli-translate-select');
   const cliEnableClip = document.getElementById('cli-enable-clip');
   const cliEnableBilingual = document.getElementById('cli-enable-bilingual');
+  const cliGemmaReview = document.getElementById('cli-gemma-review');
   const cliWhisperTranslate = document.getElementById('cli-whisper-translate');
   const cliEnableBurn = document.getElementById('cli-enable-burn');
   const cliBurnOnly = document.getElementById('cli-burn-only');
@@ -651,6 +672,7 @@
     const modelVal = cliModelSelect.value;
     const translateVal = cliTranslateSelect ? cliTranslateSelect.value : '';
     const isBilingual = cliEnableBilingual ? cliEnableBilingual.checked : false;
+    const isGemmaReview = cliGemmaReview ? cliGemmaReview.checked : false;
     const isWhisperTranslate = cliWhisperTranslate ? cliWhisperTranslate.checked : false;
 
     const parts = ['./WhisperSub.app/Contents/MacOS/WhisperSub', '--cli', inputPath];
@@ -664,6 +686,9 @@
       parts.push('--translate', translateVal);
       if (isBilingual) {
         parts.push('--bilingual');
+      }
+      if (isGemmaReview) {
+        parts.push('--gemma-review', '--gemma-model', 'e4b');
       }
     }
 
@@ -714,6 +739,10 @@
     if (translateVal && !(isWhisperTranslate && translateVal === 'en' && !isBilingual)) {
       logs.push(`<div>🌐 Translating 18 subtitle segment(s) to ${translateVal} (${modeDesc})...</div>`);
       logs.push(`<div>✅ Translated 18 subtitle segment(s) to ${translateVal}.</div>`);
+      if (isGemmaReview) {
+        logs.push(`<div>✨ Reviewing &amp; revising 18 subtitle segment(s) with Gemma 4 E4B (CoreML • ANE)...</div>`);
+        logs.push(`<div>✅ Gemma 4 E4B reviewed 18 segment(s) on Apple Neural Engine.</div>`);
+      }
     }
     if (!cliBurnOnly.checked || translateVal) {
       logs.push(`<div>📝 Saved .SRT file (${modeDesc}) to: ${srtVal}</div>`);
@@ -737,6 +766,7 @@
     cliTranslateSelect,
     cliEnableClip,
     cliEnableBilingual,
+    cliGemmaReview,
     cliWhisperTranslate,
     cliEnableBurn,
     cliBurnOnly

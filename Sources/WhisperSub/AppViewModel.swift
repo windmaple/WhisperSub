@@ -23,6 +23,7 @@ public final class AppViewModel: ObservableObject {
 
     @Published public var cues: [SubtitleCue] = []
     @Published public var srtText: String = ""
+    @Published public var selectedCueID: Int?
 
     @Published public var targetLanguage: TranslationLanguage = TranslationLanguage.defaultLanguage
     @Published public var autoTranslateOnTranscribe: Bool = false
@@ -36,7 +37,15 @@ public final class AppViewModel: ObservableObject {
     @Published public var translationProgress: Double = 0.0
     @Published public var translatedLanguage: TranslationLanguage?
 
+    @Published public var selectedGemmaModel: GemmaModelOption = GemmaModelOption.defaultModel
+    @Published public var autoReviewWithGemma: Bool = false
+    @Published public var gemmaCustomInstructions: String = ""
+    @Published public var isReviewingWithGemma: Bool = false
+    @Published public var gemmaReviewProgress: Double = 0.0
+    @Published public var lastGemmaRevisedCount: Int = 0
+
     @Published public var isBusy: Bool = false
+    @Published public var isTranscribing: Bool = false
     @Published public var isBurning: Bool = false
     @Published public var burnProgress: Double = 0.0
 
@@ -44,28 +53,72 @@ public final class AppViewModel: ObservableObject {
     @Published public var errorMessage: String?
     @Published public var lastSavedSRTURL: URL?
     @Published public var lastBurnedVideoURL: URL?
+    @Published public var hasPlayablePreview: Bool = false
+    @Published public var isPlayingBurnedVideo: Bool = false
+    @Published public var isPreparingPreview: Bool = false
 
     public let transcriptionService = WhisperTranscriptionService()
     public let translationService = SubtitleTranslationService()
+    public let gemmaReviewService = GemmaReviewService()
     private var timeObserverToken: Any?
     private weak var observedPlayer: AVPlayer?
+    private var activeProcessingTask: Task<Void, Never>?
+    private var debouncedSaveTask: Task<Void, Never>?
+    private var lastManualSeekDate: Date?
 
     public init() {}
+
+    public var isProcessingStoppableTask: Bool {
+        isTranscribing || isTranslating || isReviewingWithGemma
+    }
+
+    public func stopCurrentProcessing() {
+        activeProcessingTask?.cancel()
+        activeProcessingTask = nil
+        transcriptionService.cancel()
+        translationService.resetState()
+        gemmaReviewService.cancel()
+        isTranscribing = false
+        isTranslating = false
+        isReviewingWithGemma = false
+        isClipping = false
+        isBusy = false
+        errorMessage = nil
+        statusMessage = "Processing stopped."
+    }
 
     public var hasTranslatedCues: Bool {
         cues.contains(where: { $0.hasTranslation })
     }
 
+    public var hasGemmaReviewedCues: Bool {
+        cues.contains(where: { $0.isReviewedByGemma })
+    }
+
+    public var hasGemmaRevisions: Bool {
+        cues.contains(where: { $0.wasRevisedByGemma })
+    }
+
     public var activeSubtitleCue: SubtitleCue? {
+        if let selectedID = selectedCueID,
+           let selected = cues.first(where: { $0.id == selectedID }) {
+            let isPaused = (player?.rate ?? 0) == 0
+            if isPaused || (currentPlaybackTime >= selected.startTime - 0.12 && currentPlaybackTime < selected.endTime) {
+                return selected
+            }
+        }
+
+        // Prefer half-open interval [startTime, endTime) so exact boundary timestamps (where cue[i].endTime == cue[i+1].startTime)
+        // highlight cue[i+1] instead of cue[i].
         for cue in cues {
-            if currentPlaybackTime >= cue.startTime && currentPlaybackTime <= cue.endTime {
+            if currentPlaybackTime >= cue.startTime && currentPlaybackTime < cue.endTime {
                 return cue
             }
             if cue.startTime > currentPlaybackTime {
                 break
             }
         }
-        return nil
+        return cues.last(where: { currentPlaybackTime >= $0.startTime && currentPlaybackTime <= $0.endTime })
     }
 
     public var sourceVideoDuration: TimeInterval {
@@ -108,26 +161,24 @@ public final class AppViewModel: ObservableObject {
         clipEndText = ""
         cues = []
         srtText = ""
+        selectedCueID = nil
         translatedLanguage = nil
+        lastGemmaRevisedCount = 0
         translationService.resetState()
+        gemmaReviewService.resetState()
         currentPlaybackTime = 0
+
+        let isAlreadyBurnedFile = url.deletingPathExtension().lastPathComponent.lowercased().contains("_subtitled")
+        hasPlayablePreview = false
+        isPlayingBurnedVideo = isAlreadyBurnedFile
+        isPreparingPreview = false
 
         let newPlayer = AVPlayer(url: url)
         self.player = newPlayer
         setupTimeObserver(for: newPlayer)
 
-        let companionSRT = url.deletingPathExtension().appendingPathExtension("srt")
-        if FileManager.default.fileExists(atPath: companionSRT.path),
-           let rawSRT = try? String(contentsOf: companionSRT, encoding: .utf8) {
-            let parsed = SRTFormatter.parse(rawSRT)
-            if !parsed.isEmpty {
-                self.cues = parsed
-                self.srtText = SRTFormatter.format(cues: parsed)
-                self.lastSavedSRTURL = companionSRT
-                self.statusMessage = "Loaded \"\(url.lastPathComponent)\" and \(parsed.count) cues from \(companionSRT.lastPathComponent)."
-            } else {
-                self.statusMessage = "Loaded \"\(url.lastPathComponent)\". Ready to transcribe on Apple Neural Engine."
-            }
+        if loadCompanionSubtitles(for: url) {
+            self.statusMessage = "Loaded \"\(url.lastPathComponent)\" and \(self.cues.count) cues from \(self.lastSavedSRTURL?.lastPathComponent ?? "working copy")."
         } else {
             self.statusMessage = "Loaded \"\(url.lastPathComponent)\". Ready to transcribe on Apple Neural Engine."
         }
@@ -142,26 +193,85 @@ public final class AppViewModel: ObservableObject {
                         self.clipEndText = SRTFormatter.formatShortTimestamp(metadata.duration)
                     }
                 }
+                if metadata.isNativelyPlayable {
+                    self.hasPlayablePreview = true
+                } else {
+                    self.isPreparingPreview = true
+                    let previewURL = await VideoSubtitleBurner.preparePlayablePreviewURL(for: url)
+                    self.isPreparingPreview = false
+                    if let previewURL, self.videoURL == url {
+                        let savedTime = self.currentPlaybackTime
+                        self.cleanupTimeObserver()
+                        let previewPlayer = AVPlayer(url: previewURL)
+                        self.player = previewPlayer
+                        self.setupTimeObserver(for: previewPlayer)
+                        self.hasPlayablePreview = true
+                        self.isPlayingBurnedVideo = isAlreadyBurnedFile
+                        if savedTime > 0.01 {
+                            let target = CMTime(seconds: savedTime, preferredTimescale: 600)
+                            _ = await previewPlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+                        }
+                    }
+                }
             } catch {
                 self.errorMessage = error.localizedDescription
             }
         }
     }
 
+    public func attachBurnedPreviewPlayer(url: URL) {
+        cleanupTimeObserver()
+        lastBurnedVideoURL = url
+        hasPlayablePreview = true
+        isPlayingBurnedVideo = true
+        let burnedPlayer = AVPlayer(url: url)
+        player = burnedPlayer
+        setupTimeObserver(for: burnedPlayer)
+    }
+
+    public func selectAndSeek(to cue: SubtitleCue) {
+        selectedCueID = cue.id
+        lastManualSeekDate = Date()
+        currentPlaybackTime = cue.startTime
+        guard let player else { return }
+        // Nudge seek target slightly inside the cue (+0.02s) so video frame rounding does not land on the preceding cue's end frame.
+        let seekTargetSeconds = min(cue.endTime - 0.01, cue.startTime + 0.02)
+        let target = CMTime(seconds: max(0, seekTargetSeconds), preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
     public func seekPlayer(to seconds: TimeInterval) {
+        lastManualSeekDate = Date()
+        currentPlaybackTime = seconds
         guard let player else { return }
         let target = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
-        currentPlaybackTime = seconds
     }
 
     private func setupTimeObserver(for player: AVPlayer) {
         let interval = CMTime(seconds: 0.05, preferredTimescale: 600)
-        let token = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+        let token = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self, weak player] time in
             let secs = CMTimeGetSeconds(time)
             if secs.isFinite {
-                Task { @MainActor [weak self] in
-                    self?.currentPlaybackTime = secs
+                Task { @MainActor [weak self, weak player] in
+                    guard let self else { return }
+                    let isPlaying = (player?.rate ?? 0) != 0
+                    if !isPlaying {
+                        if let manualDate = self.lastManualSeekDate,
+                           Date().timeIntervalSince(manualDate) < 1.0 {
+                            return
+                        }
+                        if let selectedID = self.selectedCueID,
+                           let selected = self.cues.first(where: { $0.id == selectedID }),
+                           abs(secs - selected.startTime) < 0.15 {
+                            return
+                        }
+                    } else if let selectedID = self.selectedCueID,
+                              let selected = self.cues.first(where: { $0.id == selectedID }),
+                              (secs < selected.startTime - 0.1 || secs >= selected.endTime) {
+                        self.selectedCueID = nil
+                    }
+                    self.currentPlaybackTime = secs
                 }
             }
         }
@@ -276,7 +386,12 @@ public final class AppViewModel: ObservableObject {
         let newPlayer = AVPlayer(url: origURL)
         self.player = newPlayer
         setupTimeObserver(for: newPlayer)
-        statusMessage = "Reset to full video \"\(origURL.lastPathComponent)\"."
+
+        if loadCompanionSubtitles(for: origURL) {
+            statusMessage = "Reset to full video \"\(origURL.lastPathComponent)\" (\(cues.count) cues restored)."
+        } else {
+            statusMessage = "Reset to full video \"\(origURL.lastPathComponent)\"."
+        }
     }
 
     public func clipCurrentVideo() {
@@ -339,6 +454,7 @@ public final class AppViewModel: ObservableObject {
                 let newPlayer = AVPlayer(url: sourceURL)
                 self.player = newPlayer
                 setupTimeObserver(for: newPlayer)
+                _ = loadCompanionSubtitles(for: sourceURL)
             }
             return videoURL ?? sourceURL
         }
@@ -353,6 +469,8 @@ public final class AppViewModel: ObservableObject {
         }
 
         let outURL = clippedOutputURL(for: sourceURL)
+        let previousCues = self.cues
+        let previousOffset = self.appliedClipRange?.start ?? 0.0
         isClipping = true
         clipProgress = 0.0
         statusMessage = "Clipping video from \(SRTFormatter.formatShortTimestamp(range.start)) to \(SRTFormatter.formatShortTimestamp(range.end))…"
@@ -376,11 +494,41 @@ public final class AppViewModel: ObservableObject {
         self.videoMetadata = clippedMeta
         self.lastClippedVideoURL = outURL
         self.appliedClipRange = range
-        self.cues = []
-        self.srtText = ""
         self.lastSavedSRTURL = nil
         self.lastBurnedVideoURL = nil
         self.currentPlaybackTime = 0
+
+        if !previousCues.isEmpty {
+            let clipDuration = max(0.1, range.end - range.start)
+            var sliced: [SubtitleCue] = []
+            for cue in previousCues {
+                let absStart = cue.startTime + previousOffset
+                let absEnd = cue.endTime + previousOffset
+                guard absEnd > range.start + 0.05, absStart < range.end - 0.05 else { continue }
+                let shiftedStart = max(0, absStart - range.start)
+                let shiftedEnd = min(clipDuration, absEnd - range.start)
+                guard shiftedEnd > shiftedStart + 0.05 else { continue }
+                sliced.append(
+                    SubtitleCue(
+                        id: sliced.count + 1,
+                        startTime: shiftedStart,
+                        endTime: shiftedEnd,
+                        text: cue.text,
+                        translatedText: cue.translatedText,
+                        preReviewTranslatedText: cue.preReviewTranslatedText,
+                        isReviewedByGemma: cue.isReviewedByGemma
+                    )
+                )
+            }
+            self.cues = sliced
+            self.refreshSRTText()
+            if !sliced.isEmpty {
+                _ = self.saveWorkingSubtitlesToDisk(for: outURL)
+            }
+        } else {
+            self.cues = []
+            self.srtText = ""
+        }
 
         let newPlayer = AVPlayer(url: outURL)
         self.player = newPlayer
@@ -395,77 +543,208 @@ public final class AppViewModel: ObservableObject {
 
     public func refreshSRTText() {
         srtText = SRTFormatter.format(cues: cues, displayMode: subtitleDisplayMode)
+        if let activeVideo = videoURL, !cues.isEmpty {
+            let candidate = companionSRTURL(for: activeVideo)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                lastSavedSRTURL = candidate
+            }
+        }
+    }
+
+    /// Updates the in-memory right-pane working copy (`cues` + `srtText`) immediately and optionally persists it to disk.
+    private func applyWorkingCues(
+        _ latestCues: [SubtitleCue],
+        translatedLanguage: TranslationLanguage?,
+        revisedCount: Int? = nil,
+        switchToBilingualIfOriginalOnly: Bool = false,
+        saveForVideo videoURL: URL? = nil
+    ) {
+        self.cues = latestCues
+        self.translatedLanguage = translatedLanguage
+        if let revisedCount {
+            self.lastGemmaRevisedCount = revisedCount
+        }
+        if switchToBilingualIfOriginalOnly && self.subtitleDisplayMode == .originalOnly {
+            self.subtitleDisplayMode = .bilingual
+        } else {
+            self.refreshSRTText()
+        }
+        if let videoURL, !latestCues.isEmpty {
+            _ = self.saveWorkingSubtitlesToDisk(for: videoURL)
+        }
     }
 
     public func transcribeCurrentVideo() {
         guard videoURL != nil, !isBusy else { return }
         isBusy = true
+        isTranscribing = true
         errorMessage = nil
         lastSavedSRTURL = nil
         lastBurnedVideoURL = nil
         translatedLanguage = nil
+        lastGemmaRevisedCount = 0
         translationService.resetState()
+        gemmaReviewService.resetState()
 
         let model = selectedModel
         let shouldAutoTranslate = autoTranslateOnTranscribe
+        let shouldAutoGemmaReview = autoReviewWithGemma
+        let gemmaModel = selectedGemmaModel
+        let gemmaNotes = gemmaCustomInstructions
         let targetLang = targetLanguage
         let useDirectWhisperTranslate = useWhisperDirectAudioTranslate && targetLang.id == "en" && subtitleDisplayMode == .translatedOnly
 
-        Task {
+        activeProcessingTask = Task { [self] in
             defer {
                 isBusy = false
+                isTranscribing = false
                 isClipping = false
                 isTranslating = false
+                isReviewingWithGemma = false
+                activeProcessingTask = nil
             }
             do {
                 let targetVideoURL = try await performClipIfNeeded()
+                try Task.checkCancellation()
+
+                // Clear stale subtitles so the right pane reflects the live working transcription
+                self.cues = []
+                self.srtText = ""
                 statusMessage = "Preparing \(model.displayName) on Apple Neural Engine…"
 
                 var generatedCues = try await transcriptionService.transcribeVideo(
                     videoURL: targetVideoURL,
                     modelOption: model,
-                    translateToEnglish: useDirectWhisperTranslate
+                    translateToEnglish: useDirectWhisperTranslate,
+                    onPartialCues: { partialCues in
+                        Task { @MainActor [weak self] in
+                            guard let self, self.isTranscribing, !Task.isCancelled else { return }
+                            self.applyWorkingCues(
+                                partialCues,
+                                translatedLanguage: useDirectWhisperTranslate ? targetLang : nil
+                            )
+                        }
+                    }
+                )
+                isTranscribing = false
+                try Task.checkCancellation()
+
+                // Immediately update right pane and save transcribed cues before starting translation/review
+                self.applyWorkingCues(
+                    generatedCues,
+                    translatedLanguage: useDirectWhisperTranslate ? targetLang : nil,
+                    revisedCount: 0,
+                    saveForVideo: targetVideoURL
                 )
 
-                if useDirectWhisperTranslate {
-                    self.translatedLanguage = targetLang
-                } else if shouldAutoTranslate && !generatedCues.isEmpty {
+                if !useDirectWhisperTranslate && shouldAutoTranslate && !generatedCues.isEmpty {
                     isTranslating = true
                     translationProgress = 0.0
                     statusMessage = "Translating \(generatedCues.count) subtitle segments to \(targetLang.displayName)…"
                     generatedCues = try await translationService.translateCues(
                         generatedCues,
                         to: targetLang,
-                        progressHandler: { completed, total in
+                        progressHandler: { completed, total, partialCues in
                             Task { @MainActor [weak self] in
-                                guard let self, total > 0 else { return }
+                                guard let self, total > 0, !Task.isCancelled else { return }
                                 self.translationProgress = Double(completed) / Double(total)
+                                if completed > 0 {
+                                    self.applyWorkingCues(
+                                        partialCues,
+                                        translatedLanguage: targetLang,
+                                        revisedCount: 0,
+                                        switchToBilingualIfOriginalOnly: true
+                                    )
+                                }
                             }
                         }
                     )
-                    self.translatedLanguage = targetLang
                     isTranslating = false
                     translationProgress = 1.0
+                    try Task.checkCancellation()
+
+                    // Immediately update right pane and save translated working copy before Gemma review
+                    self.applyWorkingCues(
+                        generatedCues,
+                        translatedLanguage: targetLang,
+                        revisedCount: 0,
+                        switchToBilingualIfOriginalOnly: true,
+                        saveForVideo: targetVideoURL
+                    )
+
+                    if shouldAutoGemmaReview {
+                        isReviewingWithGemma = true
+                        gemmaReviewProgress = 0.0
+                        statusMessage = "Reviewing & revising \(generatedCues.count) cues with \(gemmaModel.shortName)…"
+                        let reviewResult = try await gemmaReviewService.reviewAndReviseCues(
+                            generatedCues,
+                            targetLanguage: targetLang,
+                            modelOption: gemmaModel,
+                            customInstructions: gemmaNotes,
+                            progressHandler: { completed, total, partialCues, revisedSoFar in
+                                Task { @MainActor [weak self] in
+                                    guard let self, total > 0, !Task.isCancelled else { return }
+                                    self.gemmaReviewProgress = Double(completed) / Double(total)
+                                    if completed > 0 {
+                                        self.applyWorkingCues(
+                                            partialCues,
+                                            translatedLanguage: targetLang,
+                                            revisedCount: revisedSoFar,
+                                            switchToBilingualIfOriginalOnly: true,
+                                            saveForVideo: targetVideoURL
+                                        )
+                                    }
+                                }
+                            }
+                        )
+                        generatedCues = reviewResult.cues
+                        self.lastGemmaRevisedCount = reviewResult.revisedCount
+                        isReviewingWithGemma = false
+                        gemmaReviewProgress = 1.0
+                    }
                 }
 
-                self.cues = generatedCues
-                self.refreshSRTText()
+                try Task.checkCancellation()
+                self.applyWorkingCues(
+                    generatedCues,
+                    translatedLanguage: (useDirectWhisperTranslate || shouldAutoTranslate) ? targetLang : nil,
+                    revisedCount: self.lastGemmaRevisedCount,
+                    switchToBilingualIfOriginalOnly: shouldAutoTranslate && !useDirectWhisperTranslate,
+                    saveForVideo: targetVideoURL
+                )
 
-                // Auto-write a companion .srt next to the video if writable, or inform the user
-                let defaultSRTURL = companionSRTURL(for: targetVideoURL)
-                if (try? self.srtText.write(to: defaultSRTURL, atomically: true, encoding: .utf8)) != nil {
-                    self.lastSavedSRTURL = defaultSRTURL
+                if let savedURL = self.lastSavedSRTURL {
                     if let lang = self.translatedLanguage {
-                        self.statusMessage = "Transcribed & translated \(generatedCues.count) segments (\(lang.displayName)) → \(defaultSRTURL.lastPathComponent)."
+                        if shouldAutoGemmaReview && self.hasGemmaReviewedCues {
+                            self.statusMessage = "Transcribed, translated & Gemma-revised (\(self.lastGemmaRevisedCount) refined, \(lang.displayName)) → \(savedURL.lastPathComponent)."
+                        } else {
+                            self.statusMessage = "Transcribed & translated \(generatedCues.count) segments (\(lang.displayName)) → \(savedURL.lastPathComponent)."
+                        }
                     } else {
-                        self.statusMessage = "Transcribed \(generatedCues.count) subtitle segments and saved \(defaultSRTURL.lastPathComponent)."
+                        self.statusMessage = "Transcribed \(generatedCues.count) subtitle segments and saved \(savedURL.lastPathComponent)."
                     }
                 } else {
                     self.statusMessage = "Transcribed \(generatedCues.count) subtitle segments. Click \"Save .SRT\" to export."
                 }
+            } catch is CancellationError {
+                self.errorMessage = nil
+                self.refreshSRTText()
+                if let activeVideo = self.videoURL, !self.cues.isEmpty {
+                    _ = self.saveWorkingSubtitlesToDisk(for: activeVideo)
+                }
+                self.statusMessage = "Processing stopped (\(self.cues.count) working cues kept)."
             } catch {
-                self.errorMessage = error.localizedDescription
-                self.statusMessage = "Transcription failed."
+                if Task.isCancelled || (error as NSError).code == NSURLErrorCancelled {
+                    self.errorMessage = nil
+                    self.refreshSRTText()
+                    if let activeVideo = self.videoURL, !self.cues.isEmpty {
+                        _ = self.saveWorkingSubtitlesToDisk(for: activeVideo)
+                    }
+                    self.statusMessage = "Processing stopped (\(self.cues.count) working cues kept)."
+                } else {
+                    self.errorMessage = error.localizedDescription
+                    self.statusMessage = "Transcription failed."
+                }
             }
         }
     }
@@ -475,72 +754,703 @@ public final class AppViewModel: ObservableObject {
         isBusy = true
         isTranslating = true
         translationProgress = 0.0
+        lastGemmaRevisedCount = 0
         errorMessage = nil
 
         let sourceCues = cues
         let targetLang = targetLanguage
+        let shouldAutoGemma = autoReviewWithGemma
+        let gemmaModel = selectedGemmaModel
+        let gemmaNotes = gemmaCustomInstructions
+        let activeVideoURL = videoURL
 
-        Task {
+        activeProcessingTask = Task { [self] in
             defer {
                 isBusy = false
                 isTranslating = false
+                isReviewingWithGemma = false
+                activeProcessingTask = nil
             }
             do {
                 statusMessage = "Translating \(sourceCues.count) subtitle segments to \(targetLang.displayName)…"
-                let translatedCues = try await translationService.translateCues(
+                var translatedCues = try await translationService.translateCues(
                     sourceCues,
                     to: targetLang,
-                    progressHandler: { completed, total in
+                    progressHandler: { completed, total, partialCues in
                         Task { @MainActor [weak self] in
-                            guard let self, total > 0 else { return }
+                            guard let self, total > 0, !Task.isCancelled else { return }
                             self.translationProgress = Double(completed) / Double(total)
+                            self.applyWorkingCues(
+                                partialCues,
+                                translatedLanguage: targetLang,
+                                revisedCount: 0,
+                                switchToBilingualIfOriginalOnly: true
+                            )
                         }
                     }
                 )
-
-                self.cues = translatedCues
-                self.translatedLanguage = targetLang
-                if self.subtitleDisplayMode == .originalOnly {
-                    self.subtitleDisplayMode = .bilingual
-                } else {
-                    self.refreshSRTText()
-                }
+                self.isTranslating = false
                 self.translationProgress = 1.0
+                try Task.checkCancellation()
 
-                if let activeVideo = self.videoURL {
-                    let outSRT = companionSRTURL(for: activeVideo)
-                    if (try? self.srtText.write(to: outSRT, atomically: true, encoding: .utf8)) != nil {
-                        self.lastSavedSRTURL = outSRT
-                        self.statusMessage = "Translated \(translatedCues.count) cues to \(targetLang.displayName) (\(subtitleDisplayMode.compactLabel)) → \(outSRT.lastPathComponent)."
-                        return
-                    }
+                // Immediately update right pane and save translated working copy before Gemma review
+                self.applyWorkingCues(
+                    translatedCues,
+                    translatedLanguage: targetLang,
+                    revisedCount: 0,
+                    switchToBilingualIfOriginalOnly: true,
+                    saveForVideo: activeVideoURL
+                )
+
+                if shouldAutoGemma {
+                    self.isReviewingWithGemma = true
+                    self.gemmaReviewProgress = 0.0
+                    self.statusMessage = "Reviewing & revising \(translatedCues.count) cues with \(gemmaModel.shortName)…"
+                    let reviewResult = try await gemmaReviewService.reviewAndReviseCues(
+                        translatedCues,
+                        targetLanguage: targetLang,
+                        modelOption: gemmaModel,
+                        customInstructions: gemmaNotes,
+                        progressHandler: { completed, total, partialCues, revisedSoFar in
+                            Task { @MainActor [weak self] in
+                                guard let self, total > 0, !Task.isCancelled else { return }
+                                self.gemmaReviewProgress = Double(completed) / Double(total)
+                                if completed > 0 {
+                                    self.applyWorkingCues(
+                                        partialCues,
+                                        translatedLanguage: targetLang,
+                                        revisedCount: revisedSoFar,
+                                        switchToBilingualIfOriginalOnly: true,
+                                        saveForVideo: activeVideoURL
+                                    )
+                                }
+                            }
+                        }
+                    )
+                    translatedCues = reviewResult.cues
+                    self.lastGemmaRevisedCount = reviewResult.revisedCount
+                    self.isReviewingWithGemma = false
+                    self.gemmaReviewProgress = 1.0
                 }
-                self.statusMessage = "Translated \(translatedCues.count) subtitle cues to \(targetLang.displayName) (\(subtitleDisplayMode.compactLabel))."
+
+                try Task.checkCancellation()
+                self.applyWorkingCues(
+                    translatedCues,
+                    translatedLanguage: targetLang,
+                    revisedCount: self.lastGemmaRevisedCount,
+                    switchToBilingualIfOriginalOnly: true,
+                    saveForVideo: activeVideoURL
+                )
+
+                let gemmaSummary = shouldAutoGemma ? ", Gemma revised \(self.lastGemmaRevisedCount)" : ""
+
+                if let outSRT = self.lastSavedSRTURL {
+                    self.statusMessage = "Translated \(translatedCues.count) cues to \(targetLang.displayName) (\(subtitleDisplayMode.compactLabel)\(gemmaSummary)) → \(outSRT.lastPathComponent)."
+                } else {
+                    self.statusMessage = "Translated \(translatedCues.count) subtitle cues to \(targetLang.displayName) (\(subtitleDisplayMode.compactLabel)\(gemmaSummary))."
+                }
+            } catch is CancellationError {
+                self.errorMessage = nil
+                self.refreshSRTText()
+                if let activeVideo = self.videoURL, !self.cues.isEmpty {
+                    _ = self.saveWorkingSubtitlesToDisk(for: activeVideo)
+                }
+                self.statusMessage = "Processing stopped (latest working copy kept)."
             } catch {
-                self.errorMessage = error.localizedDescription
-                self.statusMessage = "Subtitle translation failed."
+                if Task.isCancelled || (error as NSError).code == NSURLErrorCancelled {
+                    self.errorMessage = nil
+                    self.refreshSRTText()
+                    if let activeVideo = self.videoURL, !self.cues.isEmpty {
+                        _ = self.saveWorkingSubtitlesToDisk(for: activeVideo)
+                    }
+                    self.statusMessage = "Processing stopped (latest working copy kept)."
+                } else {
+                    self.errorMessage = error.localizedDescription
+                    self.statusMessage = "Subtitle translation failed."
+                }
             }
         }
+    }
+
+    public func reviewSubtitlesWithGemma() {
+        guard !cues.isEmpty, !isBusy else { return }
+        isBusy = true
+        errorMessage = nil
+
+        let targetLang = targetLanguage
+        let gemmaModel = selectedGemmaModel
+        let gemmaNotes = gemmaCustomInstructions
+        let needsInitialTranslation = !hasTranslatedCues || translatedLanguage != targetLang
+        let activeVideoURL = videoURL
+
+        activeProcessingTask = Task { [self] in
+            defer {
+                isBusy = false
+                isTranslating = false
+                isReviewingWithGemma = false
+                activeProcessingTask = nil
+            }
+            do {
+                var workingCues = self.cues
+
+                if needsInitialTranslation {
+                    isTranslating = true
+                    translationProgress = 0.0
+                    statusMessage = "Translating \(workingCues.count) subtitle segments to \(targetLang.displayName) before Gemma 4 review…"
+                    workingCues = try await translationService.translateCues(
+                        workingCues,
+                        to: targetLang,
+                        progressHandler: { completed, total, partialCues in
+                            Task { @MainActor [weak self] in
+                                guard let self, total > 0, !Task.isCancelled else { return }
+                                self.translationProgress = Double(completed) / Double(total)
+                                self.applyWorkingCues(
+                                    partialCues,
+                                    translatedLanguage: targetLang,
+                                    revisedCount: 0,
+                                    switchToBilingualIfOriginalOnly: true
+                                )
+                            }
+                        }
+                    )
+                    isTranslating = false
+                    translationProgress = 1.0
+                    try Task.checkCancellation()
+
+                    self.applyWorkingCues(
+                        workingCues,
+                        translatedLanguage: targetLang,
+                        revisedCount: 0,
+                        switchToBilingualIfOriginalOnly: true,
+                        saveForVideo: activeVideoURL
+                    )
+                }
+
+                isReviewingWithGemma = true
+                gemmaReviewProgress = 0.0
+                statusMessage = "Reviewing & revising \(workingCues.count) translated cues with \(gemmaModel.shortName)…"
+
+                let reviewResult = try await gemmaReviewService.reviewAndReviseCues(
+                    workingCues,
+                    targetLanguage: targetLang,
+                    modelOption: gemmaModel,
+                    customInstructions: gemmaNotes,
+                    progressHandler: { completed, total, partialCues, revisedSoFar in
+                        Task { @MainActor [weak self] in
+                            guard let self, total > 0, !Task.isCancelled else { return }
+                            self.gemmaReviewProgress = Double(completed) / Double(total)
+                            if completed > 0 {
+                                self.applyWorkingCues(
+                                    partialCues,
+                                    translatedLanguage: targetLang,
+                                    revisedCount: revisedSoFar,
+                                    switchToBilingualIfOriginalOnly: true,
+                                    saveForVideo: activeVideoURL
+                                )
+                            }
+                        }
+                    }
+                )
+                try Task.checkCancellation()
+
+                self.applyWorkingCues(
+                    reviewResult.cues,
+                    translatedLanguage: targetLang,
+                    revisedCount: reviewResult.revisedCount,
+                    switchToBilingualIfOriginalOnly: true,
+                    saveForVideo: activeVideoURL
+                )
+                self.gemmaReviewProgress = 1.0
+
+                if let outSRT = self.lastSavedSRTURL {
+                    self.statusMessage = "✨ \(gemmaModel.shortName) reviewed \(reviewResult.cues.count) cues (revised \(reviewResult.revisedCount)) → \(outSRT.lastPathComponent)."
+                } else {
+                    self.statusMessage = "✨ \(gemmaModel.shortName) reviewed \(reviewResult.cues.count) cues and revised \(reviewResult.revisedCount) segment(s)."
+                }
+            } catch is CancellationError {
+                self.errorMessage = nil
+                self.refreshSRTText()
+                if let activeVideo = self.videoURL, !self.cues.isEmpty {
+                    _ = self.saveWorkingSubtitlesToDisk(for: activeVideo)
+                }
+                self.statusMessage = "Processing stopped (latest working copy kept)."
+            } catch {
+                if Task.isCancelled || (error as NSError).code == NSURLErrorCancelled {
+                    self.errorMessage = nil
+                    self.refreshSRTText()
+                    if let activeVideo = self.videoURL, !self.cues.isEmpty {
+                        _ = self.saveWorkingSubtitlesToDisk(for: activeVideo)
+                    }
+                    self.statusMessage = "Processing stopped (latest working copy kept)."
+                } else {
+                    self.errorMessage = error.localizedDescription
+                    self.statusMessage = "Gemma 4 review failed."
+                }
+            }
+        }
+    }
+
+    public func revertGemmaRevisions() {
+        guard hasGemmaRevisions, !isBusy else { return }
+        let restoredCues = cues.map { cue in
+            let restored = cue.preReviewTranslatedText ?? cue.translatedText
+            return SubtitleCue(
+                id: cue.id,
+                startTime: cue.startTime,
+                endTime: cue.endTime,
+                text: cue.text,
+                translatedText: restored,
+                preReviewTranslatedText: nil,
+                isReviewedByGemma: false
+            )
+        }
+        gemmaReviewService.resetState()
+        applyWorkingCues(
+            restoredCues,
+            translatedLanguage: translatedLanguage,
+            revisedCount: 0,
+            saveForVideo: videoURL
+        )
+        statusMessage = "Reverted Gemma 4 revisions back to initial draft translation."
     }
 
     public func clearTranslations() {
         guard hasTranslatedCues, !isBusy else { return }
-        cues = cues.map { cue in
+        let clearedCues = cues.map { cue in
             SubtitleCue(id: cue.id, startTime: cue.startTime, endTime: cue.endTime, text: cue.text, translatedText: nil)
         }
-        translatedLanguage = nil
         translationService.resetState()
-        refreshSRTText()
+        gemmaReviewService.resetState()
+        applyWorkingCues(
+            clearedCues,
+            translatedLanguage: nil,
+            revisedCount: 0,
+            saveForVideo: videoURL
+        )
         statusMessage = "Cleared translated subtitles (showing original)."
+    }
+
+    // MARK: - Inline Subtitle Editing
+
+    public func updateCueOriginalText(id: Int, newText: String) {
+        guard let idx = cues.firstIndex(where: { $0.id == id }) else { return }
+        if cues[idx].text != newText {
+            cues[idx].text = newText
+            refreshSRTText()
+            scheduleDebouncedSave()
+        }
+    }
+
+    public func updateCueTranslatedText(id: Int, newText: String) {
+        guard let idx = cues.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolved: String? = trimmed.isEmpty ? nil : newText
+        if cues[idx].translatedText != resolved {
+            cues[idx].translatedText = resolved
+            if translatedLanguage == nil && resolved != nil {
+                translatedLanguage = targetLanguage
+            }
+            refreshSRTText()
+            scheduleDebouncedSave()
+        }
+    }
+
+    @discardableResult
+    public func updateCueTimestamps(id: Int, startString: String, endString: String) -> Bool {
+        guard let idx = cues.firstIndex(where: { $0.id == id }),
+              let parsedStart = SRTFormatter.parseTimestamp(startString) ?? SRTFormatter.parseFlexibleTimestamp(startString),
+              let parsedEnd = SRTFormatter.parseTimestamp(endString) ?? SRTFormatter.parseFlexibleTimestamp(endString),
+              parsedEnd > parsedStart + 0.05
+        else {
+            return false
+        }
+        cues[idx].startTime = max(0, parsedStart)
+        cues[idx].endTime = parsedEnd
+        refreshSRTText()
+        scheduleDebouncedSave()
+        return true
+    }
+
+    public func deleteCue(id: Int) {
+        guard let idx = cues.firstIndex(where: { $0.id == id }) else { return }
+        cues.remove(at: idx)
+        for i in cues.indices {
+            cues[i] = SubtitleCue(
+                id: i + 1,
+                startTime: cues[i].startTime,
+                endTime: cues[i].endTime,
+                text: cues[i].text,
+                translatedText: cues[i].translatedText,
+                preReviewTranslatedText: cues[i].preReviewTranslatedText,
+                isReviewedByGemma: cues[i].isReviewedByGemma
+            )
+        }
+        if selectedCueID == id {
+            selectedCueID = nil
+        }
+        refreshSRTText()
+        if let activeVideo = videoURL {
+            _ = saveWorkingSubtitlesToDisk(for: activeVideo)
+        }
+        statusMessage = "Deleted cue #\(id) (\(cues.count) cues remaining)."
+    }
+
+    public func addCue(after cueID: Int? = nil) {
+        let insertIndex: Int
+        let start: TimeInterval
+        let end: TimeInterval
+
+        if let cueID, let idx = cues.firstIndex(where: { $0.id == cueID }) {
+            insertIndex = idx + 1
+            start = cues[idx].endTime
+            let nextStart = (idx + 1 < cues.count) ? cues[idx + 1].startTime : (start + 2.0)
+            end = max(start + 0.5, min(start + 2.0, nextStart))
+        } else {
+            insertIndex = cues.count
+            start = cues.last?.endTime ?? currentPlaybackTime
+            end = start + 2.0
+        }
+
+        let placeholderTrans: String? = (translatedLanguage != nil || hasTranslatedCues) ? "New translated subtitle…" : nil
+        let newCue = SubtitleCue(
+            id: insertIndex + 1,
+            startTime: start,
+            endTime: end,
+            text: "New subtitle…",
+            translatedText: placeholderTrans
+        )
+        cues.insert(newCue, at: insertIndex)
+        for i in cues.indices {
+            cues[i] = SubtitleCue(
+                id: i + 1,
+                startTime: cues[i].startTime,
+                endTime: cues[i].endTime,
+                text: cues[i].text,
+                translatedText: cues[i].translatedText,
+                preReviewTranslatedText: cues[i].preReviewTranslatedText,
+                isReviewedByGemma: cues[i].isReviewedByGemma
+            )
+        }
+        selectedCueID = insertIndex + 1
+        refreshSRTText()
+        if let activeVideo = videoURL {
+            _ = saveWorkingSubtitlesToDisk(for: activeVideo)
+        }
+        statusMessage = "Added cue #\(insertIndex + 1)."
+    }
+
+    public func applyRawSRTEdits(_ rawContent: String) {
+        let parsed = SRTFormatter.parse(rawContent)
+        guard !parsed.isEmpty else { return }
+
+        let oldByID = Dictionary(uniqueKeysWithValues: cues.map { ($0.id, $0) })
+        let updated: [SubtitleCue] = parsed.map { block in
+            let prev = oldByID[block.id]
+            switch subtitleDisplayMode {
+            case .bilingual:
+                let (orig, trans) = Self.splitBilingualCueText(
+                    block.text,
+                    knownOriginal: prev?.text,
+                    isBilingualFile: true
+                )
+                return SubtitleCue(
+                    id: block.id,
+                    startTime: block.startTime,
+                    endTime: block.endTime,
+                    text: orig,
+                    translatedText: trans,
+                    preReviewTranslatedText: prev?.preReviewTranslatedText,
+                    isReviewedByGemma: prev?.isReviewedByGemma ?? false
+                )
+            case .translatedOnly:
+                if hasTranslatedCues || translatedLanguage != nil {
+                    return SubtitleCue(
+                        id: block.id,
+                        startTime: block.startTime,
+                        endTime: block.endTime,
+                        text: prev?.text ?? block.text,
+                        translatedText: block.text,
+                        preReviewTranslatedText: prev?.preReviewTranslatedText,
+                        isReviewedByGemma: prev?.isReviewedByGemma ?? false
+                    )
+                } else {
+                    return block
+                }
+            case .originalOnly:
+                return SubtitleCue(
+                    id: block.id,
+                    startTime: block.startTime,
+                    endTime: block.endTime,
+                    text: block.text,
+                    translatedText: prev?.translatedText,
+                    preReviewTranslatedText: prev?.preReviewTranslatedText,
+                    isReviewedByGemma: prev?.isReviewedByGemma ?? false
+                )
+            }
+        }
+
+        self.cues = updated
+        if updated.contains(where: { $0.hasTranslation }) && translatedLanguage == nil {
+            translatedLanguage = targetLanguage
+        }
+        refreshSRTText()
+        if let activeVideo = videoURL {
+            _ = saveWorkingSubtitlesToDisk(for: activeVideo)
+        }
+        statusMessage = "Applied edits from Raw .SRT (\(updated.count) cues updated)."
+    }
+
+    private func scheduleDebouncedSave() {
+        debouncedSaveTask?.cancel()
+        debouncedSaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard let self, !Task.isCancelled, let activeVideo = self.videoURL, !self.cues.isEmpty else { return }
+            _ = self.saveWorkingSubtitlesToDisk(for: activeVideo)
+        }
+    }
+
+    // MARK: - Working Copy Persistence & Companion .SRT Sync
+
+    private struct WorkingSubtitleSnapshot: Codable {
+        let videoPath: String
+        let savedAt: Date
+        let translatedLanguageID: String?
+        let lastGemmaRevisedCount: Int
+        let cues: [SubtitleCue]
+    }
+
+    private func workingCopySnapshotURL(for videoURL: URL) -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let folder = appSupport
+            .appendingPathComponent("WhisperSub", isDirectory: true)
+            .appendingPathComponent("working_copies", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let safeKey = Data(videoURL.standardizedFileURL.path.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        return folder.appendingPathComponent("\(safeKey.suffix(96)).json")
     }
 
     private func companionSRTURL(for videoURL: URL) -> URL {
         let base = videoURL.deletingPathExtension()
-        if let lang = translatedLanguage, hasTranslatedCues {
+        if let lang = translatedLanguage, hasTranslatedCues, subtitleDisplayMode != .originalOnly {
             let suffix = subtitleDisplayMode == .bilingual ? "bilingual_\(lang.id)" : lang.id
             return base.deletingLastPathComponent().appendingPathComponent("\(base.lastPathComponent)_\(suffix).srt")
         }
         return base.appendingPathExtension("srt")
+    }
+
+    /// Writes the latest working subtitles to all companion `.srt` files (`<base>.srt`, `<base>_<lang>.srt`, `<base>_bilingual_<lang>.srt`)
+    /// as well as the local working-copy snapshot so no companion `.srt` on disk is ever left stale.
+    @discardableResult
+    private func saveWorkingSubtitlesToDisk(for videoURL: URL) -> URL? {
+        guard !cues.isEmpty else { return nil }
+        let base = videoURL.deletingPathExtension()
+        let parentDir = base.deletingLastPathComponent()
+        let baseName = base.lastPathComponent
+
+        let snapshot = WorkingSubtitleSnapshot(
+            videoPath: videoURL.standardizedFileURL.path,
+            savedAt: Date(),
+            translatedLanguageID: hasTranslatedCues ? translatedLanguage?.id : nil,
+            lastGemmaRevisedCount: lastGemmaRevisedCount,
+            cues: cues
+        )
+        if let data = try? JSONEncoder().encode(snapshot) {
+            try? data.write(to: workingCopySnapshotURL(for: videoURL), options: .atomic)
+        }
+
+        let origSRTURL = base.appendingPathExtension("srt")
+        let origContent = SRTFormatter.format(cues: cues, displayMode: .originalOnly)
+        var wroteAny = false
+        if (try? origContent.write(to: origSRTURL, atomically: true, encoding: .utf8)) != nil {
+            wroteAny = true
+        }
+
+        if let lang = translatedLanguage, hasTranslatedCues {
+            let transOnlyURL = parentDir.appendingPathComponent("\(baseName)_\(lang.id).srt")
+            let bilingualURL = parentDir.appendingPathComponent("\(baseName)_bilingual_\(lang.id).srt")
+            let transOnlyContent = SRTFormatter.format(cues: cues, displayMode: .translatedOnly)
+            let bilingualContent = SRTFormatter.format(cues: cues, displayMode: .bilingual)
+            if (try? transOnlyContent.write(to: transOnlyURL, atomically: true, encoding: .utf8)) != nil {
+                wroteAny = true
+            }
+            if (try? bilingualContent.write(to: bilingualURL, atomically: true, encoding: .utf8)) != nil {
+                wroteAny = true
+            }
+        }
+
+        if wroteAny {
+            let activeURL = companionSRTURL(for: videoURL)
+            self.lastSavedSRTURL = activeURL
+            return activeURL
+        }
+        return nil
+    }
+
+    /// Loads the most recent working subtitles for `url` by comparing the working-copy snapshot and all companion `.srt` files on disk.
+    @discardableResult
+    private func loadCompanionSubtitles(for url: URL) -> Bool {
+        let base = url.deletingPathExtension()
+        let parentDir = base.deletingLastPathComponent()
+        let baseName = base.lastPathComponent
+
+        let companionSRT = base.appendingPathExtension("srt")
+        let translatedSRT = parentDir.appendingPathComponent("\(baseName)_\(targetLanguage.id).srt")
+        let bilingualSRT = parentDir.appendingPathComponent("\(baseName)_bilingual_\(targetLanguage.id).srt")
+
+        func mtime(_ fileURL: URL) -> Date? {
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+            return (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        }
+
+        let companionDate = mtime(companionSRT)
+        let transDate = mtime(translatedSRT)
+        let bilingualDate = mtime(bilingualSRT)
+        let newestDiskDate = [companionDate, transDate, bilingualDate].compactMap { $0 }.max()
+
+        // 1. Check working copy snapshot if it is at least as fresh as the files on disk
+        let snapshotURL = workingCopySnapshotURL(for: url)
+        if let data = try? Data(contentsOf: snapshotURL),
+           let snapshot = try? JSONDecoder().decode(WorkingSubtitleSnapshot.self, from: data),
+           !snapshot.cues.isEmpty {
+            let isSnapshotFresh = newestDiskDate == nil || snapshot.savedAt.addingTimeInterval(2.0) >= newestDiskDate!
+            if isSnapshotFresh {
+                self.cues = snapshot.cues
+                if let langID = snapshot.translatedLanguageID,
+                   let lang = TranslationLanguage.resolve(langID) {
+                    self.translatedLanguage = lang
+                } else {
+                    self.translatedLanguage = nil
+                }
+                self.lastGemmaRevisedCount = snapshot.lastGemmaRevisedCount
+                self.refreshSRTText()
+                let candidateURL = companionSRTURL(for: url)
+                if FileManager.default.fileExists(atPath: candidateURL.path) {
+                    self.lastSavedSRTURL = candidateURL
+                } else if FileManager.default.fileExists(atPath: companionSRT.path) {
+                    self.lastSavedSRTURL = companionSRT
+                }
+                return true
+            }
+        }
+
+        // 2. Otherwise, load from the freshest companion .srt files on disk
+        var baseCues: [SubtitleCue] = []
+        if let rawOrig = try? String(contentsOf: companionSRT, encoding: .utf8) {
+            baseCues = SRTFormatter.parse(rawOrig)
+        }
+
+        // Pick whichever translation file (_bilingual_<lang>.srt vs _<lang>.srt) was modified more recently
+        let chosenTranslationSource: (url: URL, isBilingual: Bool, date: Date)? = {
+            switch (bilingualDate, transDate) {
+            case let (bDate?, tDate?):
+                if bDate >= tDate {
+                    return (bilingualSRT, true, bDate)
+                } else {
+                    return (translatedSRT, false, tDate)
+                }
+            case let (bDate?, nil):
+                return (bilingualSRT, true, bDate)
+            case let (nil, tDate?):
+                return (translatedSRT, false, tDate)
+            case (nil, nil):
+                return nil
+            }
+        }()
+
+        if let transSource = chosenTranslationSource,
+           let rawTrans = try? String(contentsOf: transSource.url, encoding: .utf8) {
+            let transParsed = SRTFormatter.parse(rawTrans)
+
+            // Only apply translation file if baseCues is empty OR its cue count matches baseCues
+            // (and if baseCues is newer than transSource by > 10s with different cues, prefer fresh baseCues)
+            let isTransCompatibleWithBase = baseCues.isEmpty || (
+                transParsed.count == baseCues.count &&
+                (companionDate == nil || transSource.date.addingTimeInterval(10.0) >= companionDate!)
+            )
+
+            if isTransCompatibleWithBase && !transParsed.isEmpty {
+                if baseCues.isEmpty {
+                    baseCues = transParsed.map { cue in
+                        let (orig, trans) = Self.splitBilingualCueText(cue.text, knownOriginal: nil, isBilingualFile: transSource.isBilingual)
+                        return SubtitleCue(
+                            id: cue.id,
+                            startTime: cue.startTime,
+                            endTime: cue.endTime,
+                            text: orig,
+                            translatedText: trans
+                        )
+                    }
+                } else {
+                    let transMap = Dictionary(uniqueKeysWithValues: transParsed.map { ($0.id, $0.text) })
+                    for idx in baseCues.indices {
+                        if let rawCueText = transMap[baseCues[idx].id], !rawCueText.isEmpty {
+                            let (_, trans) = Self.splitBilingualCueText(
+                                rawCueText,
+                                knownOriginal: baseCues[idx].text,
+                                isBilingualFile: transSource.isBilingual
+                            )
+                            baseCues[idx].translatedText = trans ?? rawCueText
+                        }
+                    }
+                }
+                self.translatedLanguage = targetLanguage
+                self.cues = baseCues
+                self.refreshSRTText()
+                // Synchronize all companion .srt files on disk with this loaded working copy
+                _ = self.saveWorkingSubtitlesToDisk(for: url)
+                self.lastSavedSRTURL = transSource.url
+                return true
+            }
+        }
+
+        if !baseCues.isEmpty {
+            self.translatedLanguage = nil
+            self.cues = baseCues
+            self.refreshSRTText()
+            self.lastSavedSRTURL = companionSRT
+            return true
+        }
+
+        return false
+    }
+
+    private static func splitBilingualCueText(
+        _ rawText: String,
+        knownOriginal: String?,
+        isBilingualFile: Bool
+    ) -> (original: String, translated: String?) {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let orig = knownOriginal?.trimmingCharacters(in: .whitespacesAndNewlines), !orig.isEmpty {
+            if trimmed.hasPrefix(orig) {
+                let remainder = trimmed.dropFirst(orig.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !remainder.isEmpty {
+                    return (orig, remainder)
+                }
+            }
+            if !isBilingualFile {
+                return (orig, trimmed)
+            }
+        }
+
+        let lines = trimmed
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        if isBilingualFile && lines.count >= 2 {
+            let orig = knownOriginal ?? lines.first!
+            let trans = lines.dropFirst().joined(separator: "\n")
+            return (orig, trans)
+        }
+
+        if let orig = knownOriginal {
+            return (orig, trimmed)
+        }
+        return (trimmed, nil)
     }
 
     // MARK: - SRT Import / Export
@@ -573,6 +1483,46 @@ public final class AppViewModel: ObservableObject {
         }
     }
 
+    public func applyImportedSRTFile(url: URL) throws {
+        let raw = try String(contentsOf: url, encoding: .utf8)
+        let parsed = SRTFormatter.parse(raw)
+        let fileNameLower = url.deletingPathExtension().lastPathComponent.lowercased()
+        let isBilingualFile = fileNameLower.contains("_bilingual")
+
+        var detectedLang: TranslationLanguage?
+        for lang in TranslationLanguage.availableLanguages {
+            if fileNameLower.hasSuffix("_\(lang.id.lowercased())") {
+                detectedLang = lang
+                break
+            }
+        }
+
+        let resolvedCues: [SubtitleCue]
+        if isBilingualFile {
+            resolvedCues = parsed.map { cue in
+                let (orig, trans) = Self.splitBilingualCueText(cue.text, knownOriginal: nil, isBilingualFile: true)
+                return SubtitleCue(
+                    id: cue.id,
+                    startTime: cue.startTime,
+                    endTime: cue.endTime,
+                    text: orig,
+                    translatedText: trans
+                )
+            }
+        } else {
+            resolvedCues = parsed
+        }
+
+        self.cues = resolvedCues
+        self.translatedLanguage = isBilingualFile ? (detectedLang ?? targetLanguage) : nil
+        self.lastGemmaRevisedCount = 0
+        self.translationService.resetState()
+        self.gemmaReviewService.resetState()
+        self.refreshSRTText()
+        self.lastSavedSRTURL = url
+        self.statusMessage = "Loaded \(resolvedCues.count) subtitle cues from \(url.lastPathComponent)."
+    }
+
     public func importSRTFile() {
         let panel = NSOpenPanel()
         panel.title = "Load Existing .SRT File"
@@ -585,14 +1535,7 @@ public final class AppViewModel: ObservableObject {
 
         if panel.runModal() == .OK, let url = panel.url {
             do {
-                let raw = try String(contentsOf: url, encoding: .utf8)
-                let parsed = SRTFormatter.parse(raw)
-                self.cues = parsed
-                self.translatedLanguage = nil
-                self.translationService.resetState()
-                self.refreshSRTText()
-                self.lastSavedSRTURL = url
-                self.statusMessage = "Loaded \(parsed.count) subtitle cues from \(url.lastPathComponent)."
+                try applyImportedSRTFile(url: url)
             } catch {
                 self.errorMessage = "Failed to read .srt file: \(error.localizedDescription)"
             }
@@ -633,7 +1576,7 @@ public final class AppViewModel: ObservableObject {
         let currentCues = self.cues
         let currentDisplayMode = self.subtitleDisplayMode
 
-        Task {
+        Task { [self] in
             defer {
                 isBusy = false
                 isBurning = false
@@ -653,9 +1596,11 @@ public final class AppViewModel: ObservableObject {
                 self.burnProgress = 1.0
                 self.lastBurnedVideoURL = outputURL
                 self.statusMessage = "Burned subtitles (\(currentDisplayMode.compactLabel)) into \(outputURL.lastPathComponent)!"
-                if self.videoMetadata?.isNativelyPlayable == false {
+                if !self.hasPlayablePreview {
                     let burnedPlayer = AVPlayer(url: outputURL)
                     self.player = burnedPlayer
+                    self.hasPlayablePreview = true
+                    self.isPlayingBurnedVideo = true
                     self.setupTimeObserver(for: burnedPlayer)
                 }
             } catch {

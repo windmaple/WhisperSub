@@ -38,34 +38,51 @@ public final class SubtitleTranslationService: ObservableObject {
     public func translateCues(
         _ cues: [SubtitleCue],
         to targetLanguage: TranslationLanguage,
-        progressHandler: (@Sendable (Int, Int) -> Void)? = nil
+        progressHandler: (@Sendable (Int, Int, [SubtitleCue]) -> Void)? = nil
     ) async throws -> [SubtitleCue] {
         guard !cues.isEmpty else {
             throw SubtitleTranslationError.emptySubtitles
         }
 
         let total = cues.count
+        var workingCues: [SubtitleCue] = cues.map { cue in
+            SubtitleCue(
+                id: cue.id,
+                startTime: cue.startTime,
+                endTime: cue.endTime,
+                text: cue.text,
+                translatedText: nil,
+                preReviewTranslatedText: nil,
+                isReviewedByGemma: false
+            )
+        }
+
         state = .translating(completed: 0, total: total, targetLanguage: targetLanguage.displayName)
-        progressHandler?(0, total)
+        progressHandler?(0, total, workingCues)
 
         do {
-            let batches = Self.makeBatches(from: cues, maxCuesPerBatch: 10, maxCharsPerBatch: 1100)
-            var updatedCues: [SubtitleCue] = []
-            updatedCues.reserveCapacity(total)
+            let batches = Self.makeBatches(from: workingCues, maxCuesPerBatch: 10, maxCharsPerBatch: 1100)
 
             var completed = 0
             var detectedSource: String?
 
             for batch in batches {
+                try Task.checkCancellation()
                 let (translatedBatch, batchSource) = try await Self.translateBatch(
                     batch,
                     targetLanguageCode: targetLanguage.id
                 )
+                try Task.checkCancellation()
                 if detectedSource == nil, let batchSource, !batchSource.isEmpty {
                     detectedSource = batchSource
                 }
 
-                updatedCues.append(contentsOf: translatedBatch)
+                for (offset, item) in translatedBatch.enumerated() {
+                    let targetIndex = completed + offset
+                    if targetIndex < workingCues.count {
+                        workingCues[targetIndex] = item
+                    }
+                }
                 completed += translatedBatch.count
 
                 state = .translating(
@@ -73,16 +90,20 @@ public final class SubtitleTranslationService: ObservableObject {
                     total: total,
                     targetLanguage: targetLanguage.displayName
                 )
-                progressHandler?(completed, total)
+                progressHandler?(completed, total, workingCues)
             }
 
             state = .completed(
-                cueCount: updatedCues.count,
+                cueCount: workingCues.count,
                 targetLanguage: targetLanguage.displayName,
                 detectedSourceLanguage: detectedSource
             )
-            return updatedCues
+            return workingCues
         } catch {
+            if error is CancellationError || (error as NSError).code == NSURLErrorCancelled || Task.isCancelled {
+                state = .idle
+                throw CancellationError()
+            }
             state = .failed(error.localizedDescription)
             throw error
         }
@@ -223,8 +244,9 @@ public final class SubtitleTranslationService: ObservableObject {
 
         var lastError: Error?
         for attempt in 0..<3 {
+            try Task.checkCancellation()
             if attempt > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(attempt) * 350_000_000)
+                try await Task.sleep(nanoseconds: UInt64(attempt) * 350_000_000)
             }
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)

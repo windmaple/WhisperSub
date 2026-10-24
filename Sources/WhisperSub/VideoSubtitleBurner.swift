@@ -55,6 +55,7 @@ public enum VideoSubtitleBurnerError: LocalizedError {
 }
 
 public final class SubtitleOverlayCache: @unchecked Sendable {
+    private static let renderLock = NSLock()
     private let lock = NSLock()
     private var cache: [Int: CIImage] = [:]
     private let cues: [SubtitleCue]
@@ -81,35 +82,48 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
 
     public func overlayImage(for cue: SubtitleCue) -> CIImage? {
         lock.lock()
+        defer { lock.unlock() }
         if let existing = cache[cue.id] {
-            lock.unlock()
             return existing
         }
-        lock.unlock()
 
         guard let rendered = Self.renderCueImage(cue: cue, displayMode: displayMode, renderSize: renderSize) else {
             return nil
         }
 
-        lock.lock()
         cache[cue.id] = rendered
-        lock.unlock()
         return rendered
     }
 
-    private static func renderCueImage(
+    public static func renderCueImage(
         cue: SubtitleCue,
         displayMode: SubtitleDisplayMode,
         renderSize: CGSize
     ) -> CIImage? {
+        guard let cgImage = renderCueCGImage(cue: cue, displayMode: displayMode, renderSize: renderSize, canvasHeight: nil) else {
+            return nil
+        }
+        return CIImage(cgImage: cgImage)
+    }
+
+    public static func renderCueCGImage(
+        cue: SubtitleCue,
+        displayMode: SubtitleDisplayMode,
+        renderSize: CGSize,
+        canvasHeight: Int? = nil
+    ) -> CGImage? {
+        renderLock.lock()
+        defer { renderLock.unlock() }
+
         let width = max(1, Int(renderSize.width.rounded()))
-        let height = max(1, Int(renderSize.height.rounded()))
+        let fullHeight = max(1, Int(renderSize.height.rounded()))
+        let bitmapHeight = max(1, min(fullHeight, canvasHeight ?? fullHeight))
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         guard let cgContext = CGContext(
             data: nil,
             width: width,
-            height: height,
+            height: bitmapHeight,
             bitsPerComponent: 8,
             bytesPerRow: width * 4,
             space: colorSpace,
@@ -118,7 +132,7 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
             return nil
         }
 
-        cgContext.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        cgContext.clear(CGRect(x: 0, y: 0, width: width, height: bitmapHeight))
 
         let nsContext = NSGraphicsContext(cgContext: cgContext, flipped: false)
         NSGraphicsContext.saveGraphicsState()
@@ -127,7 +141,7 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
             NSGraphicsContext.restoreGraphicsState()
         }
 
-        let minDimension = min(CGFloat(width), CGFloat(height))
+        let minDimension = min(CGFloat(width), CGFloat(fullHeight))
 
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(0.85)
@@ -192,7 +206,7 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
 
         let maxBoxWidth = CGFloat(width) * 0.84
         let boundingRect = attrString.boundingRect(
-            with: NSSize(width: maxBoxWidth, height: CGFloat(height) * 0.45),
+            with: NSSize(width: maxBoxWidth, height: CGFloat(fullHeight) * 0.45),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
 
@@ -205,9 +219,9 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
         let pillWidth = min(CGFloat(width) * 0.92, textWidth + horizontalPadding * 2.0)
         let pillHeight = textHeight + verticalPadding * 2.0
 
-        let bottomMargin = max(24.0, round(CGFloat(height) * 0.065))
+        let bottomMargin = max(24.0, round(CGFloat(fullHeight) * 0.065))
         let pillX = round((CGFloat(width) - pillWidth) / 2.0)
-        let pillY = bottomMargin
+        let pillY = min(bottomMargin, max(4.0, CGFloat(bitmapHeight) - pillHeight - 4.0))
 
         let pillRect = NSRect(x: pillX, y: pillY, width: pillWidth, height: pillHeight)
         let cornerRadius = min(14.0, round(pillHeight * 0.25))
@@ -231,8 +245,29 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
 
-        guard let cgImage = cgContext.makeImage() else { return nil }
-        return CIImage(cgImage: cgImage)
+        return cgContext.makeImage()
+    }
+
+    public static func renderBlankPNGData(width: Int, height: Int) -> Data? {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let cgContext = CGContext(
+            data: nil,
+            width: max(1, width),
+            height: max(1, height),
+            bitsPerComponent: 8,
+            bytesPerRow: max(1, width) * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ),
+        let cgImage = cgContext.makeImage() else {
+            return nil
+        }
+        return pngData(from: cgImage)
+    }
+
+    public static func pngData(from cgImage: CGImage) -> Data? {
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        return rep.representation(using: .png, properties: [:])
     }
 }
 
@@ -360,6 +395,111 @@ public enum VideoSubtitleBurner {
                 isNativelyPlayable: false
             )
         }.value
+    }
+
+    /// Prepares a clean (unburned) natively-playable `.mp4` preview file in the user cache for non-native containers (`.webm`, `.mkv`),
+    /// so `AVPlayer` can play the clean video while SwiftUI renders a single live subtitle overlay.
+    public static func preparePlayablePreviewURL(for videoURL: URL) async -> URL? {
+        guard let ffmpegPath = findExecutable(named: "ffmpeg") else { return nil }
+
+        let cachesBase = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let previewDir = cachesBase.appendingPathComponent("WhisperSub/Previews", isDirectory: true)
+        try? FileManager.default.createDirectory(at: previewDir, withIntermediateDirectories: true)
+
+        let attrs = try? FileManager.default.attributesOfItem(atPath: videoURL.path)
+        let fileSize = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        let modDate = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let rawKey = "\(videoURL.standardizedFileURL.path)|\(fileSize)|\(Int64(modDate))"
+        var fnv: UInt64 = 14695981039346656037
+        for byte in rawKey.utf8 {
+            fnv ^= UInt64(byte)
+            fnv &*= 1099511628211
+        }
+        let cachedURL = previewDir.appendingPathComponent(String(format: "preview_%016llx.mp4", fnv))
+
+        if FileManager.default.fileExists(atPath: cachedURL.path),
+           let cachedSize = (try? FileManager.default.attributesOfItem(atPath: cachedURL.path)[.size] as? NSNumber)?.int64Value,
+           cachedSize > 1024 {
+            return cachedURL
+        }
+
+        let tempURL = previewDir.appendingPathComponent("temp_\(UUID().uuidString).mp4")
+        defer {
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+
+        // 1. Try fast lossless video stream-copy remux into .mp4 with hardware AAC audio (works for AV1 / H.264 / HEVC in .webm / .mkv)
+        let remuxSuccess = await Task.detached { () -> Bool in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: ffmpegPath)
+            process.arguments = [
+                "-nostdin",
+                "-loglevel", "error",
+                "-y",
+                "-i", videoURL.path,
+                "-c:v", "copy",
+                "-c:a", "aac_at",
+                tempURL.path
+            ]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+                process.waitUntilExit()
+                return process.terminationStatus == 0 && FileManager.default.fileExists(atPath: tempURL.path)
+            } catch {
+                return false
+            }
+        }.value
+
+        if remuxSuccess {
+            let asset = AVURLAsset(url: tempURL)
+            let playable = (try? await asset.load(.isPlayable)) ?? false
+            let tracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
+            if playable && !tracks.isEmpty {
+                try? FileManager.default.removeItem(at: cachedURL)
+                try? FileManager.default.moveItem(at: tempURL, to: cachedURL)
+                return cachedURL
+            }
+        }
+
+        // 2. Fallback for VP8/VP9 .webm/.mkv: transcode video using hardware VideoToolbox H.264
+        try? FileManager.default.removeItem(at: tempURL)
+        let transcodeSuccess = await Task.detached { () -> Bool in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: ffmpegPath)
+            process.arguments = [
+                "-nostdin",
+                "-loglevel", "error",
+                "-y",
+                "-i", videoURL.path,
+                "-vf", "scale=-2:'min(1080,ih)'",
+                "-c:v", "h264_videotoolbox",
+                "-q:v", "65",
+                "-c:a", "aac_at",
+                tempURL.path
+            ]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+                process.waitUntilExit()
+                return process.terminationStatus == 0 && FileManager.default.fileExists(atPath: tempURL.path)
+            } catch {
+                return false
+            }
+        }.value
+
+        if transcodeSuccess {
+            try? FileManager.default.removeItem(at: cachedURL)
+            try? FileManager.default.moveItem(at: tempURL, to: cachedURL)
+            return cachedURL
+        }
+
+        return nil
     }
 
     /// Extracts a 16kHz mono WAV file from a video URL into a temporary file for fast Whisper transcription.
@@ -543,48 +683,71 @@ public enum VideoSubtitleBurner {
                 outputURL: outputURL,
                 cues: cues,
                 displayMode: displayMode,
+                videoSize: meta.size,
                 totalDuration: meta.duration,
                 progressHandler: progressHandler
             )
             return
         }
 
-        let videoComposition = try await makeVideoComposition(for: asset, cues: cues, displayMode: displayMode)
+        do {
+            let videoComposition = try await makeVideoComposition(for: asset, cues: cues, displayMode: displayMode)
 
-        guard let exportSession = AVAssetExportSession(
-            asset: asset,
-            presetName: AVAssetExportPresetHighestQuality
-        ) else {
-            throw VideoSubtitleBurnerError.exportSessionCreationFailed
-        }
-
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = .mp4
-        exportSession.shouldOptimizeForNetworkUse = true
-        exportSession.videoComposition = videoComposition
-
-        let progressTask = Task {
-            while !Task.isCancelled {
-                let currentProgress = Double(exportSession.progress)
-                progressHandler(min(0.99, max(0.0, currentProgress)))
-                try? await Task.sleep(nanoseconds: 120_000_000)
+            guard let exportSession = AVAssetExportSession(
+                asset: asset,
+                presetName: AVAssetExportPresetHighestQuality
+            ) else {
+                throw VideoSubtitleBurnerError.exportSessionCreationFailed
             }
-        }
 
-        await exportSession.export()
-        progressTask.cancel()
+            exportSession.outputURL = outputURL
+            exportSession.outputFileType = .mp4
+            exportSession.shouldOptimizeForNetworkUse = true
+            exportSession.videoComposition = videoComposition
 
-        switch exportSession.status {
-        case .completed:
-            progressHandler(1.0)
-        case .cancelled:
-            throw VideoSubtitleBurnerError.exportCancelled
-        case .failed:
-            let message = exportSession.error?.localizedDescription ?? "Unknown AVAssetExportSession error"
-            throw VideoSubtitleBurnerError.exportFailed(message)
-        default:
-            let message = exportSession.error?.localizedDescription ?? "Export ended with status \(exportSession.status.rawValue)"
-            throw VideoSubtitleBurnerError.exportFailed(message)
+            let progressTask = Task {
+                while !Task.isCancelled {
+                    let currentProgress = Double(exportSession.progress)
+                    progressHandler(min(0.99, max(0.0, currentProgress)))
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                }
+            }
+
+            await exportSession.export()
+            progressTask.cancel()
+
+            switch exportSession.status {
+            case .completed:
+                progressHandler(1.0)
+                return
+            case .cancelled:
+                throw VideoSubtitleBurnerError.exportCancelled
+            case .failed:
+                let message = exportSession.error?.localizedDescription ?? "Unknown AVAssetExportSession error"
+                throw VideoSubtitleBurnerError.exportFailed(message)
+            default:
+                let message = exportSession.error?.localizedDescription ?? "Export ended with status \(exportSession.status.rawValue)"
+                throw VideoSubtitleBurnerError.exportFailed(message)
+            }
+        } catch let error as VideoSubtitleBurnerError where error.localizedDescription == VideoSubtitleBurnerError.exportCancelled.localizedDescription {
+            throw error
+        } catch {
+            if let ffmpegPath = findExecutable(named: "ffmpeg") {
+                try? FileManager.default.removeItem(at: outputURL)
+                let meta = try await inspectVideo(url: sourceURL)
+                try await burnSubtitlesWithFFmpeg(
+                    ffmpegPath: ffmpegPath,
+                    sourceURL: sourceURL,
+                    outputURL: outputURL,
+                    cues: cues,
+                    displayMode: displayMode,
+                    videoSize: meta.size,
+                    totalDuration: meta.duration,
+                    progressHandler: progressHandler
+                )
+                return
+            }
+            throw error
         }
     }
 
@@ -594,30 +757,101 @@ public enum VideoSubtitleBurner {
         outputURL: URL,
         cues: [SubtitleCue],
         displayMode: SubtitleDisplayMode = .translatedOnly,
+        videoSize: CGSize,
         totalDuration: TimeInterval,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
-        let tempDir = FileManager.default.temporaryDirectory
-        let tempSRTName = "whispersub_burn_\(UUID().uuidString).srt"
-        let tempSRTURL = tempDir.appendingPathComponent(tempSRTName)
-        let srtContent = SRTFormatter.format(cues: cues, displayMode: displayMode)
-        try srtContent.write(to: tempSRTURL, atomically: true, encoding: .utf8)
+        let tempSubDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("whispersub_burn_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempSubDir, withIntermediateDirectories: true)
         defer {
-            try? FileManager.default.removeItem(at: tempSRTURL)
+            try? FileManager.default.removeItem(at: tempSubDir)
+        }
+
+        // Render subtitle overlays as transparent bottom-strip PNGs via CoreGraphics/AppKit so we do not depend on libass/subtitles filter in ffmpeg
+        let videoWidth = max(2, Int(videoSize.width.rounded()))
+        let videoHeight = max(2, Int(videoSize.height.rounded()))
+        let scaleDownFactor: CGFloat = videoWidth > 1920 ? (1920.0 / CGFloat(videoWidth)) : 1.0
+        let renderWidth = max(2, Int(round(CGFloat(videoWidth) * scaleDownFactor)))
+        let renderHeight = max(2, Int(round(CGFloat(videoHeight) * scaleDownFactor)))
+        let bandHeight = max(140, Int(ceil(CGFloat(renderHeight) * 0.36)))
+        let scaledBandHeight = max(140, Int(round(CGFloat(bandHeight) / scaleDownFactor)))
+        let renderSize = CGSize(width: renderWidth, height: renderHeight)
+
+        let blankFileName = "blank.png"
+        let blankURL = tempSubDir.appendingPathComponent(blankFileName)
+        guard let blankData = SubtitleOverlayCache.renderBlankPNGData(width: renderWidth, height: bandHeight) else {
+            throw VideoSubtitleBurnerError.exportFailed("Could not allocate transparent overlay buffer.")
+        }
+        try blankData.write(to: blankURL, options: .atomic)
+
+        let validCues = cues
+            .filter { $0.endTime > $0.startTime + 0.01 }
+            .sorted { $0.startTime < $1.startTime }
+
+        var concatLines: [String] = ["ffconcat version 1.0"]
+        var cursor: TimeInterval = 0.0
+
+        for cue in validCues {
+            let effectiveStart = max(cursor, cue.startTime)
+            let effectiveEnd = cue.endTime
+            guard effectiveEnd > effectiveStart + 0.02 else { continue }
+
+            guard let cgImg = SubtitleOverlayCache.renderCueCGImage(
+                cue: cue,
+                displayMode: displayMode,
+                renderSize: renderSize,
+                canvasHeight: bandHeight
+            ),
+            let pngData = SubtitleOverlayCache.pngData(from: cgImg) else {
+                continue
+            }
+
+            if effectiveStart > cursor + 0.02 {
+                concatLines.append("file '\(blankFileName)'")
+                concatLines.append(String(format: "duration %.3f", effectiveStart - cursor))
+            }
+
+            let cueFileName = "cue_\(cue.id).png"
+            let cueFileURL = tempSubDir.appendingPathComponent(cueFileName)
+            try pngData.write(to: cueFileURL)
+
+            concatLines.append("file '\(cueFileName)'")
+            concatLines.append(String(format: "duration %.3f", effectiveEnd - effectiveStart))
+            cursor = effectiveEnd
+        }
+
+        let tailDuration = max(1.0, totalDuration - cursor + 1.0)
+        concatLines.append("file '\(blankFileName)'")
+        concatLines.append(String(format: "duration %.3f", tailDuration))
+        concatLines.append("file '\(blankFileName)'")
+
+        let concatURL = tempSubDir.appendingPathComponent("subtitles.ffconcat")
+        try concatLines.joined(separator: "\n").write(to: concatURL, atomically: true, encoding: .utf8)
+
+        let filterComplex: String
+        if renderWidth == videoWidth {
+            filterComplex = "[0:v][1:v]overlay=0:H-h:eof_action=pass[vout]"
+        } else {
+            filterComplex = "[1:v]scale=\(videoWidth):\(scaledBandHeight):flags=bilinear[sub];[0:v][sub]overlay=0:H-h:eof_action=pass[vout]"
         }
 
         try await Task.detached {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: ffmpegPath)
-            process.currentDirectoryURL = tempDir
+            process.currentDirectoryURL = tempSubDir
 
-            let style = "FontName=PingFang SC,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H99000000,BackColour=&H99000000,BorderStyle=4,Outline=1,Shadow=0,MarginV=24,Alignment=2"
             process.arguments = [
                 "-nostdin",
                 "-loglevel", "error",
                 "-y",
                 "-i", sourceURL.path,
-                "-vf", "subtitles=\(tempSRTName):force_style='\(style)'",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concatURL.path,
+                "-filter_complex", filterComplex,
+                "-map", "[vout]",
+                "-map", "0:a?",
                 "-c:v", "h264_videotoolbox",
                 "-q:v", "65",
                 "-c:a", "aac",
