@@ -37,6 +37,49 @@ public struct ContentView: View {
         }
         .frame(minWidth: 900, minHeight: 620)
         .background(Color(NSColor.windowBackgroundColor))
+        .overlay(alignment: .topTrailing) {
+            if let banner = viewModel.activeNotificationBanner {
+                HStack(spacing: 12) {
+                    Image(systemName: banner.systemImage)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(banner.title)
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.primary)
+                        Text(banner.message)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Button {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            viewModel.activeNotificationBanner = nil
+                        }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(.regularMaterial)
+                        .shadow(color: Color.black.opacity(0.22), radius: 10, x: 0, y: 4)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(Color.green.opacity(0.35), lineWidth: 1)
+                )
+                .padding(.top, 64)
+                .padding(.trailing, 18)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.82), value: viewModel.activeNotificationBanner)
     }
 
     // MARK: - Top Header Bar
@@ -221,16 +264,20 @@ public struct ContentView: View {
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(.white.opacity(0.86))
                                 .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
                             Text(translated)
                                 .font(.system(size: 15, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
+                        .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text(cue.displayText(for: viewModel.subtitleDisplayMode))
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.white)
                             .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .padding(.horizontal, 14)

@@ -106,6 +106,29 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
         return CIImage(cgImage: cgImage)
     }
 
+    private final class TextBlockLayout {
+        let storage: NSTextStorage
+        let layoutManager: NSLayoutManager
+        let container: NSTextContainer
+        let usedRect: NSRect
+
+        init(attributedString: NSAttributedString, maxWidth: CGFloat) {
+            storage = NSTextStorage(attributedString: attributedString)
+            layoutManager = NSLayoutManager()
+            container = NSTextContainer(size: NSSize(width: maxWidth, height: 10_000))
+            container.lineFragmentPadding = 0
+            layoutManager.addTextContainer(container)
+            storage.addLayoutManager(layoutManager)
+            _ = layoutManager.glyphRange(for: container)
+            usedRect = layoutManager.usedRect(for: container)
+        }
+
+        func draw(at point: NSPoint) {
+            let glyphRange = layoutManager.glyphRange(for: container)
+            layoutManager.drawGlyphs(forGlyphRange: glyphRange, at: point)
+        }
+    }
+
     public static func renderCueCGImage(
         cue: SubtitleCue,
         displayMode: SubtitleDisplayMode,
@@ -134,35 +157,41 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
 
         cgContext.clear(CGRect(x: 0, y: 0, width: width, height: bitmapHeight))
 
-        let nsContext = NSGraphicsContext(cgContext: cgContext, flipped: false)
+        let nsContext = NSGraphicsContext(cgContext: cgContext, flipped: true)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = nsContext
+        cgContext.translateBy(x: 0, y: CGFloat(bitmapHeight))
+        cgContext.scaleBy(x: 1, y: -1)
         defer {
             NSGraphicsContext.restoreGraphicsState()
         }
 
         let minDimension = min(CGFloat(width), CGFloat(fullHeight))
+        let maxBoxWidth = round(CGFloat(width) * 0.84)
 
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(0.85)
         shadow.shadowBlurRadius = 3.0
         shadow.shadowOffset = NSSize(width: 0, height: -1.5)
 
-        let attrString: NSAttributedString
         let baseFontSize: CGFloat
+        let origLayout: TextBlockLayout?
+        let primaryLayout: TextBlockLayout
+        let interBlockGap: CGFloat
 
         if displayMode == .bilingual,
            let translated = cue.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
            !translated.isEmpty,
            translated != cue.text {
+            let origTrimmed = cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
             baseFontSize = max(16.0, min(60.0, round(minDimension * 0.038)))
             let originalFontSize = max(13.0, round(baseFontSize * 0.80))
+            interBlockGap = max(4.0, round(baseFontSize * 0.16))
 
             let paragraphStyle = NSMutableParagraphStyle()
             paragraphStyle.alignment = .center
             paragraphStyle.lineBreakMode = .byWordWrapping
             paragraphStyle.lineSpacing = max(2.0, round(baseFontSize * 0.10))
-            paragraphStyle.paragraphSpacing = max(3.0, round(baseFontSize * 0.14))
 
             let originalAttrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: originalFontSize, weight: .medium),
@@ -177,17 +206,22 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
                 .shadow: shadow
             ]
 
-            let combined = NSMutableAttributedString(
-                string: cue.text.trimmingCharacters(in: .whitespacesAndNewlines) + "\n",
-                attributes: originalAttrs
-            )
-            combined.append(NSAttributedString(string: translated, attributes: translatedAttrs))
-            attrString = combined
+            if !origTrimmed.isEmpty {
+                let origAttr = NSAttributedString(string: origTrimmed, attributes: originalAttrs)
+                origLayout = TextBlockLayout(attributedString: origAttr, maxWidth: maxBoxWidth)
+            } else {
+                origLayout = nil
+            }
+
+            let transAttr = NSAttributedString(string: translated, attributes: translatedAttrs)
+            primaryLayout = TextBlockLayout(attributedString: transAttr, maxWidth: maxBoxWidth)
         } else {
             let cleanText = cue.displayText(for: displayMode).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleanText.isEmpty else { return nil }
 
             baseFontSize = max(18.0, min(72.0, round(minDimension * 0.044)))
+            interBlockGap = 0
+            origLayout = nil
             let font = NSFont.systemFont(ofSize: baseFontSize, weight: .semibold)
 
             let paragraphStyle = NSMutableParagraphStyle()
@@ -201,17 +235,17 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
                 .paragraphStyle: paragraphStyle,
                 .shadow: shadow
             ]
-            attrString = NSAttributedString(string: cleanText, attributes: attributes)
+            let attrString = NSAttributedString(string: cleanText, attributes: attributes)
+            primaryLayout = TextBlockLayout(attributedString: attrString, maxWidth: maxBoxWidth)
         }
 
-        let maxBoxWidth = CGFloat(width) * 0.84
-        let boundingRect = attrString.boundingRect(
-            with: NSSize(width: maxBoxWidth, height: CGFloat(fullHeight) * 0.45),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        )
+        let origWidth = origLayout.map { ceil($0.usedRect.width) } ?? 0
+        let origHeight = origLayout.map { ceil($0.usedRect.height) } ?? 0
+        let primaryWidth = ceil(primaryLayout.usedRect.width)
+        let primaryHeight = ceil(primaryLayout.usedRect.height)
 
-        let textWidth = ceil(boundingRect.width)
-        let textHeight = ceil(boundingRect.height)
+        let textWidth = max(origWidth, primaryWidth)
+        let textHeight = origLayout != nil ? (origHeight + interBlockGap + primaryHeight) : primaryHeight
 
         let horizontalPadding = max(16.0, round(baseFontSize * 0.65))
         let verticalPadding = max(10.0, round(baseFontSize * 0.36))
@@ -221,7 +255,8 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
 
         let bottomMargin = max(24.0, round(CGFloat(fullHeight) * 0.065))
         let pillX = round((CGFloat(width) - pillWidth) / 2.0)
-        let pillY = min(bottomMargin, max(4.0, CGFloat(bitmapHeight) - pillHeight - 4.0))
+        // In flipped top-down coordinates (y=0 is top of bitmap, y=bitmapHeight is bottom of frame):
+        let pillY = max(4.0, CGFloat(bitmapHeight) - bottomMargin - pillHeight)
 
         let pillRect = NSRect(x: pillX, y: pillY, width: pillWidth, height: pillHeight)
         let cornerRadius = min(14.0, round(pillHeight * 0.25))
@@ -234,16 +269,14 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
         pillPath.lineWidth = 1.0
         pillPath.stroke()
 
-        let textRect = NSRect(
-            x: round(pillX + (pillWidth - textWidth) / 2.0),
-            y: round(pillY + (pillHeight - textHeight) / 2.0),
-            width: textWidth,
-            height: textHeight
-        )
-        attrString.draw(
-            with: textRect,
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        )
+        let containerX = round((CGFloat(width) - maxBoxWidth) / 2.0)
+        var currentY = round(pillY + verticalPadding)
+
+        if let origLayout {
+            origLayout.draw(at: NSPoint(x: containerX, y: currentY))
+            currentY = round(currentY + origHeight + interBlockGap)
+        }
+        primaryLayout.draw(at: NSPoint(x: containerX, y: currentY))
 
         return cgContext.makeImage()
     }
@@ -774,8 +807,8 @@ public enum VideoSubtitleBurner {
         let scaleDownFactor: CGFloat = videoWidth > 1920 ? (1920.0 / CGFloat(videoWidth)) : 1.0
         let renderWidth = max(2, Int(round(CGFloat(videoWidth) * scaleDownFactor)))
         let renderHeight = max(2, Int(round(CGFloat(videoHeight) * scaleDownFactor)))
-        let bandHeight = max(140, Int(ceil(CGFloat(renderHeight) * 0.36)))
-        let scaledBandHeight = max(140, Int(round(CGFloat(bandHeight) / scaleDownFactor)))
+        let bandHeight = max(180, Int(ceil(CGFloat(renderHeight) * 0.42)))
+        let scaledBandHeight = max(180, Int(round(CGFloat(bandHeight) / scaleDownFactor)))
         let renderSize = CGSize(width: renderWidth, height: renderHeight)
 
         let blankFileName = "blank.png"

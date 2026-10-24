@@ -3,6 +3,90 @@ import SwiftUI
 import AVFoundation
 import AppKit
 import UniformTypeIdentifiers
+import UserNotifications
+
+public struct CompletionNotificationBanner: Identifiable, Equatable, Sendable {
+    public let id = UUID()
+    public let title: String
+    public let message: String
+    public let systemImage: String
+}
+
+public final class UserNotificationManager: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    public static let shared = UserNotificationManager()
+
+    private override init() {
+        super.init()
+    }
+
+    public func configure() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+    }
+
+    public func postNotification(title: String, body: String) {
+        Task.detached(priority: .utility) {
+            var deliveredViaUN = false
+            if Bundle.main.bundleIdentifier != nil {
+                let center = UNUserNotificationCenter.current()
+                let settings = await center.notificationSettings()
+                if settings.authorizationStatus == .notDetermined {
+                    _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+                }
+                let updatedSettings = await center.notificationSettings()
+                if updatedSettings.authorizationStatus == .authorized || updatedSettings.authorizationStatus == .provisional {
+                    let content = UNMutableNotificationContent()
+                    content.title = "WhisperSub — \(title)"
+                    content.body = body
+                    content.sound = .default
+                    let req = UNNotificationRequest(
+                        identifier: UUID().uuidString,
+                        content: content,
+                        trigger: nil
+                    )
+                    if (try? await center.add(req)) != nil {
+                        deliveredViaUN = true
+                    }
+                }
+            }
+
+            if !deliveredViaUN {
+                let safeTitle = title
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                let safeBody = body
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                let script = "display notification \"\(safeBody)\" with title \"WhisperSub\" subtitle \"\(safeTitle)\" sound name \"Glass\""
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                proc.arguments = ["-e", script]
+                proc.standardInput = FileHandle.nullDevice
+                proc.standardOutput = FileHandle.nullDevice
+                proc.standardError = FileHandle.nullDevice
+                try? proc.run()
+                proc.waitUntilExit()
+            }
+
+            await MainActor.run {
+                NSSound(named: NSSound.Name("Glass"))?.play()
+                if NSApplication.shared.isActive == false {
+                    NSApplication.shared.requestUserAttention(.informationalRequest)
+                }
+            }
+        }
+    }
+
+    public func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+}
 
 @MainActor
 public final class AppViewModel: ObservableObject {
@@ -56,6 +140,7 @@ public final class AppViewModel: ObservableObject {
     @Published public var hasPlayablePreview: Bool = false
     @Published public var isPlayingBurnedVideo: Bool = false
     @Published public var isPreparingPreview: Bool = false
+    @Published public var activeNotificationBanner: CompletionNotificationBanner?
 
     public let transcriptionService = WhisperTranscriptionService()
     public let translationService = SubtitleTranslationService()
@@ -64,9 +149,38 @@ public final class AppViewModel: ObservableObject {
     private weak var observedPlayer: AVPlayer?
     private var activeProcessingTask: Task<Void, Never>?
     private var debouncedSaveTask: Task<Void, Never>?
+    private var notificationDismissTask: Task<Void, Never>?
     private var lastManualSeekDate: Date?
 
-    public init() {}
+    public init() {
+        UserNotificationManager.shared.configure()
+    }
+
+    public func postCompletionNotification(title: String, message: String, systemImage: String) {
+        let banner = CompletionNotificationBanner(title: title, message: message, systemImage: systemImage)
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            activeNotificationBanner = banner
+        }
+        UserNotificationManager.shared.postNotification(title: title, body: message)
+
+        notificationDismissTask?.cancel()
+        notificationDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            if self.activeNotificationBanner?.id == banner.id {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    self.activeNotificationBanner = nil
+                }
+            }
+        }
+    }
+
+    public func dismissNotificationBanner() {
+        notificationDismissTask?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) {
+            activeNotificationBanner = nil
+        }
+    }
 
     public var isProcessingStoppableTask: Bool {
         isTranscribing || isTranslating || isReviewingWithGemma
@@ -636,6 +750,11 @@ public final class AppViewModel: ObservableObject {
                     revisedCount: 0,
                     saveForVideo: targetVideoURL
                 )
+                self.postCompletionNotification(
+                    title: "Transcription Complete",
+                    message: "Transcribed \(generatedCues.count) subtitle cues from \(targetVideoURL.lastPathComponent).",
+                    systemImage: "waveform.badge.checkmark"
+                )
 
                 if !useDirectWhisperTranslate && shouldAutoTranslate && !generatedCues.isEmpty {
                     isTranslating = true
@@ -701,6 +820,11 @@ public final class AppViewModel: ObservableObject {
                         self.lastGemmaRevisedCount = reviewResult.revisedCount
                         isReviewingWithGemma = false
                         gemmaReviewProgress = 1.0
+                        self.postCompletionNotification(
+                            title: "Gemma 4 Revision Complete",
+                            message: "Reviewed \(reviewResult.cues.count) cues and revised \(reviewResult.revisedCount) segment(s) with \(gemmaModel.shortName).",
+                            systemImage: "sparkles"
+                        )
                     }
                 }
 
@@ -831,6 +955,11 @@ public final class AppViewModel: ObservableObject {
                     self.lastGemmaRevisedCount = reviewResult.revisedCount
                     self.isReviewingWithGemma = false
                     self.gemmaReviewProgress = 1.0
+                    self.postCompletionNotification(
+                        title: "Gemma 4 Revision Complete",
+                        message: "Reviewed \(reviewResult.cues.count) cues and revised \(reviewResult.revisedCount) segment(s) with \(gemmaModel.shortName).",
+                        systemImage: "sparkles"
+                    )
                 }
 
                 try Task.checkCancellation()
@@ -967,6 +1096,11 @@ public final class AppViewModel: ObservableObject {
                 } else {
                     self.statusMessage = "✨ \(gemmaModel.shortName) reviewed \(reviewResult.cues.count) cues and revised \(reviewResult.revisedCount) segment(s)."
                 }
+                self.postCompletionNotification(
+                    title: "Gemma 4 Revision Complete",
+                    message: "Reviewed \(reviewResult.cues.count) cues and revised \(reviewResult.revisedCount) segment(s) with \(gemmaModel.shortName).",
+                    systemImage: "sparkles"
+                )
             } catch is CancellationError {
                 self.errorMessage = nil
                 self.refreshSRTText()
@@ -1151,6 +1285,7 @@ public final class AppViewModel: ObservableObject {
                 let (orig, trans) = Self.splitBilingualCueText(
                     block.text,
                     knownOriginal: prev?.text,
+                    knownTranslated: prev?.translatedText,
                     isBilingualFile: true
                 )
                 return SubtitleCue(
@@ -1418,9 +1553,22 @@ public final class AppViewModel: ObservableObject {
         return false
     }
 
+    private static func containsCJK(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            if (0x4E00...0x9FFF).contains(scalar.value) ||
+               (0x3400...0x4DBF).contains(scalar.value) ||
+               (0x3040...0x30FF).contains(scalar.value) ||
+               (0xAC00...0xD7AF).contains(scalar.value) {
+                return true
+            }
+        }
+        return false
+    }
+
     private static func splitBilingualCueText(
         _ rawText: String,
         knownOriginal: String?,
+        knownTranslated: String? = nil,
         isBilingualFile: Bool
     ) -> (original: String, translated: String?) {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1436,13 +1584,38 @@ public final class AppViewModel: ObservableObject {
             }
         }
 
+        if let trans = knownTranslated?.trimmingCharacters(in: .whitespacesAndNewlines), !trans.isEmpty {
+            if trimmed.hasSuffix(trans) {
+                let leading = trimmed.dropLast(trans.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !leading.isEmpty {
+                    return (leading, trans)
+                }
+            }
+        }
+
         let lines = trimmed
             .components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
 
         if isBilingualFile && lines.count >= 2 {
-            let orig = knownOriginal ?? lines.first!
+            if let orig = knownOriginal?.trimmingCharacters(in: .whitespacesAndNewlines), !orig.isEmpty {
+                let origLineCount = orig.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count
+                let dropCount = min(max(1, origLineCount), lines.count - 1)
+                let trans = lines.dropFirst(dropCount).joined(separator: "\n")
+                return (orig, trans)
+            }
+            if lines.count >= 3 {
+                if let firstCJKIndex = lines.indices.dropFirst().first(where: { Self.containsCJK(lines[$0]) }) {
+                    let orig = lines[..<firstCJKIndex].joined(separator: "\n")
+                    let trans = lines[firstCJKIndex...].joined(separator: "\n")
+                    return (orig, trans)
+                }
+                let orig = lines.dropLast().joined(separator: "\n")
+                let trans = lines.last!
+                return (orig, trans)
+            }
+            let orig = lines.first!
             let trans = lines.dropFirst().joined(separator: "\n")
             return (orig, trans)
         }
@@ -1596,6 +1769,11 @@ public final class AppViewModel: ObservableObject {
                 self.burnProgress = 1.0
                 self.lastBurnedVideoURL = outputURL
                 self.statusMessage = "Burned subtitles (\(currentDisplayMode.compactLabel)) into \(outputURL.lastPathComponent)!"
+                self.postCompletionNotification(
+                    title: "Subtitle Burn Complete",
+                    message: "Burned \(currentCues.count) subtitles (\(currentDisplayMode.compactLabel)) into \(outputURL.lastPathComponent).",
+                    systemImage: "flame.fill"
+                )
                 if !self.hasPlayablePreview {
                     let burnedPlayer = AVPlayer(url: outputURL)
                     self.player = burnedPlayer
