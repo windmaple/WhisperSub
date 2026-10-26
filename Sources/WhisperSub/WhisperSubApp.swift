@@ -23,7 +23,7 @@ struct WhisperSubMain {
     @MainActor
     private static func runCLIMode(args: [String]) async {
         guard let inputPath = args.first else {
-            fputs("Usage: WhisperSub --cli <input-video> [--start <time>] [--end <time>] [--clip-out <clip.mp4>] [--translate <lang>] [--bilingual] [--word-by-word|--no-word-by-word] [--whisper-translate] [--gemma-review] [--gemma-model <e4b|e2b>] [--gemma-prompt <notes>] [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
+            fputs("Usage: WhisperSub --cli <input-video> [--start <time>] [--end <time>] [--shorts|--aspect 9:16] [--crop-focus <0..1>] [--clip-out <clip.mp4>] [--translate <lang>] [--bilingual] [--word-by-word|--no-word-by-word] [--whisper-translate] [--gemma-review] [--gemma-model <e4b|e2b>] [--gemma-prompt <notes>] [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
             exit(1)
         }
 
@@ -34,6 +34,8 @@ struct WhisperSubMain {
         var clipOutURL: URL?
         var clipStartArg: String?
         var clipEndArg: String?
+        var aspectRatioMode: VideoAspectRatioMode = .original
+        var horizontalFocus: Double = 0.5
         var translateLangArg: String?
         var bilingualMode = false
         var wordByWord = true
@@ -55,6 +57,23 @@ struct WhisperSubMain {
             case "--end":
                 if i + 1 < args.count {
                     clipEndArg = args[i + 1]
+                    i += 1
+                }
+            case "--shorts", "--9:16", "--vertical":
+                aspectRatioMode = .vertical9x16
+            case "--aspect":
+                if i + 1 < args.count {
+                    let val = args[i + 1].lowercased()
+                    if val.contains("9:16") || val.contains("9x16") || val.contains("short") || val.contains("vertical") {
+                        aspectRatioMode = .vertical9x16
+                    } else {
+                        aspectRatioMode = .original
+                    }
+                    i += 1
+                }
+            case "--crop-focus":
+                if i + 1 < args.count, let parsed = Double(args[i + 1]) {
+                    horizontalFocus = min(1.0, max(0.0, parsed))
                     i += 1
                 }
             case "--clip-out":
@@ -126,7 +145,7 @@ struct WhisperSubMain {
             print("   Resolution: \(meta.formattedResolution), Duration: \(meta.formattedDuration)")
 
             var activeVideoURL = inputURL
-            if clipStartArg != nil || clipEndArg != nil {
+            if clipStartArg != nil || clipEndArg != nil || clipOutURL != nil || (aspectRatioMode != .original && burnOutURL == nil) {
                 let startSec: TimeInterval
                 if let rawStart = clipStartArg {
                     guard let parsed = SRTFormatter.parseFlexibleTimestamp(rawStart) else {
@@ -147,19 +166,23 @@ struct WhisperSubMain {
                     endSec = meta.duration
                 }
 
+                let defaultSuffix = aspectRatioMode == .vertical9x16 ? "_shorts.mp4" : "_clipped.mp4"
                 let targetClipURL = clipOutURL
-                    ?? inputURL.deletingLastPathComponent().appendingPathComponent("\(inputURL.deletingPathExtension().lastPathComponent)_clipped.mp4")
+                    ?? inputURL.deletingLastPathComponent().appendingPathComponent("\(inputURL.deletingPathExtension().lastPathComponent)\(defaultSuffix)")
 
-                print("✂️ Clipping video from \(SRTFormatter.formatShortTimestamp(startSec)) to \(SRTFormatter.formatShortTimestamp(endSec)) -> \(targetClipURL.path)")
+                let aspectNote = aspectRatioMode == .vertical9x16 ? " (9:16 Shorts)" : ""
+                print("✂️ Cutting video from \(SRTFormatter.formatShortTimestamp(startSec)) to \(SRTFormatter.formatShortTimestamp(endSec))\(aspectNote) -> \(targetClipURL.path)")
                 try await VideoSubtitleBurner.clipVideo(
                     sourceURL: inputURL,
                     outputURL: targetClipURL,
                     startTime: startSec,
-                    endTime: endSec
+                    endTime: endSec,
+                    aspectRatioMode: aspectRatioMode,
+                    horizontalFocus: horizontalFocus
                 )
                 activeVideoURL = targetClipURL
                 let clippedMeta = try await VideoSubtitleBurner.inspectVideo(url: activeVideoURL)
-                print("✅ Clipped video duration: \(clippedMeta.formattedDuration)")
+                print("✅ Cut video: \(clippedMeta.formattedResolution), duration: \(clippedMeta.formattedDuration)")
             }
 
             var cues: [SubtitleCue]
@@ -222,13 +245,16 @@ struct WhisperSubMain {
             }
 
             if let burnURL = burnOutURL {
-                print("🔥 Burning subtitles (\(displayMode.compactLabel)\(wordByWord ? ", word-by-word" : "")) into video: \(burnURL.path)")
+                let aspectNote = aspectRatioMode == .vertical9x16 ? ", 9:16 Shorts" : ""
+                print("🔥 Burning subtitles (\(displayMode.compactLabel)\(wordByWord ? ", word-by-word" : "")\(aspectNote)) into video: \(burnURL.path)")
                 try await VideoSubtitleBurner.burnSubtitles(
                     sourceURL: activeVideoURL,
                     outputURL: burnURL,
                     cues: cues,
                     displayMode: displayMode,
                     wordByWord: wordByWord,
+                    aspectRatioMode: aspectRatioMode,
+                    horizontalFocus: horizontalFocus,
                     progressHandler: { _ in }
                 )
                 print("✅ Exported burned video to: \(burnURL.path)")

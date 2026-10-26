@@ -253,64 +253,146 @@ public struct ContentView: View {
                 .allowsHitTesting(false)
             }
 
+            if viewModel.isShowingShortsPreviewGuide, let meta = viewModel.videoMetadata {
+                shortsCropGuideOverlay(videoSize: meta.size)
+                    .allowsHitTesting(false)
+            }
+
             if let cue = viewModel.activeSubtitleCue, !viewModel.isPlayingBurnedVideo {
-                let fullOrig = (cue.fullLayoutText ?? cue.text).trimmingCharacters(in: .whitespacesAndNewlines)
-                let fullTrans = (cue.fullLayoutTranslatedText ?? cue.translatedText)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let fullSingleDisplay = cue.fullLayoutDisplayText(for: viewModel.subtitleDisplayMode)
+                GeometryReader { geo in
+                    let shortsColumn = shortsOverlayColumnMetrics(containerSize: geo.size)
+                    let fullOrig = (cue.fullLayoutText ?? cue.text).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let fullTrans = (cue.fullLayoutTranslatedText ?? cue.translatedText)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let fullSingleDisplay = cue.fullLayoutDisplayText(for: viewModel.subtitleDisplayMode)
 
-                let liveOriginal = viewModel.wordByWordSubtitles
-                    ? cue.progressiveOriginalText(at: viewModel.currentPlaybackTime)
-                    : fullOrig
-                let liveTranslated = viewModel.wordByWordSubtitles
-                    ? (cue.progressiveTranslatedText(at: viewModel.currentPlaybackTime) ?? "")
-                    : (fullTrans ?? "")
-                let liveSingleDisplay = viewModel.wordByWordSubtitles
-                    ? cue.progressiveDisplayText(at: viewModel.currentPlaybackTime, for: viewModel.subtitleDisplayMode)
-                    : fullSingleDisplay
+                    let liveOriginal = viewModel.wordByWordSubtitles
+                        ? cue.progressiveOriginalText(at: viewModel.currentPlaybackTime)
+                        : fullOrig
+                    let liveTranslated = viewModel.wordByWordSubtitles
+                        ? (cue.progressiveTranslatedText(at: viewModel.currentPlaybackTime) ?? "")
+                        : (fullTrans ?? "")
+                    let liveSingleDisplay = viewModel.wordByWordSubtitles
+                        ? cue.progressiveDisplayText(at: viewModel.currentPlaybackTime, for: viewModel.subtitleDisplayMode)
+                        : fullSingleDisplay
 
-                Group {
-                    if viewModel.subtitleDisplayMode == .bilingual,
-                       let fullTrans,
-                       !fullTrans.isEmpty,
-                       fullTrans != fullOrig {
-                        VStack(spacing: 3) {
-                            staticWidthProgressiveText(
-                                fullText: fullOrig,
-                                visiblePrefix: liveOriginal,
-                                font: .system(size: 13, weight: .medium),
-                                visibleColor: .white.opacity(0.86)
-                            )
-                            staticWidthProgressiveText(
-                                fullText: fullTrans,
-                                visiblePrefix: liveTranslated,
-                                font: .system(size: 15, weight: .semibold),
-                                visibleColor: .white
-                            )
+                    VStack {
+                        Spacer()
+                        Group {
+                            if viewModel.subtitleDisplayMode == .bilingual,
+                               let fullTrans,
+                               !fullTrans.isEmpty,
+                               fullTrans != fullOrig {
+                                VStack(spacing: 3) {
+                                    staticWidthProgressiveText(
+                                        fullText: fullOrig,
+                                        visiblePrefix: liveOriginal,
+                                        font: .system(size: 13, weight: .medium),
+                                        visibleColor: .white.opacity(0.86)
+                                    )
+                                    staticWidthProgressiveText(
+                                        fullText: fullTrans,
+                                        visiblePrefix: liveTranslated,
+                                        font: .system(size: 15, weight: .semibold),
+                                        visibleColor: .white
+                                    )
+                                }
+                                .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                staticWidthProgressiveText(
+                                    fullText: fullSingleDisplay,
+                                    visiblePrefix: liveSingleDisplay,
+                                    font: .system(size: 15, weight: .semibold),
+                                    visibleColor: .white
+                                )
+                            }
                         }
-                        .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        staticWidthProgressiveText(
-                            fullText: fullSingleDisplay,
-                            visiblePrefix: liveSingleDisplay,
-                            font: .system(size: 15, weight: .semibold),
-                            visibleColor: .white
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.black.opacity(0.78))
+                        )
+                        .frame(maxWidth: max(120, shortsColumn.width - 16))
+                        .position(
+                            x: shortsColumn.centerX,
+                            y: geo.size.height - 58
                         )
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.black.opacity(0.78))
-                )
-                .padding(.horizontal, 24)
-                .padding(.bottom, 42)
                 .allowsHitTesting(false)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers: providers)
+        }
+    }
+
+    private func shortsOverlayColumnMetrics(containerSize: CGSize) -> (width: CGFloat, centerX: CGFloat) {
+        guard viewModel.isShowingShortsPreviewGuide,
+              let meta = viewModel.videoMetadata,
+              meta.size.width > 0,
+              meta.size.height > 0,
+              containerSize.width > 0,
+              containerSize.height > 0 else {
+            return (width: max(160, containerSize.width - 48), centerX: containerSize.width / 2.0)
+        }
+        let videoAspect = meta.size.width / meta.size.height
+        let containerAspect = containerSize.width / containerSize.height
+        let dispW: CGFloat = videoAspect > containerAspect ? containerSize.width : (containerSize.height * videoAspect)
+        let dispH: CGFloat = videoAspect > containerAspect ? (containerSize.width / videoAspect) : containerSize.height
+        let dispX = (containerSize.width - dispW) / 2.0
+        let shortsW = min(dispW, dispH * (9.0 / 16.0))
+        let offsetX = (dispW - shortsW) * CGFloat(min(1.0, max(0.0, viewModel.horizontalCropFocus)))
+        return (width: shortsW, centerX: dispX + offsetX + shortsW / 2.0)
+    }
+
+    private func shortsCropGuideOverlay(videoSize: CGSize) -> some View {
+        GeometryReader { geo in
+            let w = max(1, geo.size.width)
+            let h = max(1, geo.size.height)
+            let videoAspect = max(0.1, videoSize.width / max(1, videoSize.height))
+            let containerAspect = w / h
+            let dispW: CGFloat = videoAspect > containerAspect ? w : (h * videoAspect)
+            let dispH: CGFloat = videoAspect > containerAspect ? (w / videoAspect) : h
+            let dispX = (w - dispW) / 2.0
+            let dispY = (h - dispH) / 2.0
+            let shortsW = min(dispW, dispH * (9.0 / 16.0))
+            let focus = CGFloat(min(1.0, max(0.0, viewModel.horizontalCropFocus)))
+            let shortsX = dispX + (dispW - shortsW) * focus
+            let leftMaskW = max(0, shortsX - dispX)
+            let rightMaskW = max(0, (dispX + dispW) - (shortsX + shortsW))
+
+            ZStack(alignment: .topLeading) {
+                if leftMaskW > 1 {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.62))
+                        .frame(width: leftMaskW, height: dispH)
+                        .offset(x: dispX, y: dispY)
+                }
+                if rightMaskW > 1 {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.62))
+                        .frame(width: rightMaskW, height: dispH)
+                        .offset(x: shortsX + shortsW, y: dispY)
+                }
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(0.85), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                    .frame(width: shortsW, height: dispH)
+                    .offset(x: shortsX, y: dispY)
+
+                HStack(spacing: 4) {
+                    Image(systemName: "rectangle.portrait.fill")
+                        .font(.system(size: 9, weight: .bold))
+                    Text("9:16 SHORTS")
+                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(Color.accentColor.opacity(0.9)))
+                .foregroundStyle(.white)
+                .offset(x: shortsX + (shortsW / 2.0) - 42, y: dispY + 8)
+            }
         }
     }
 
@@ -470,8 +552,57 @@ public struct ContentView: View {
                 .disabled(viewModel.videoURL == nil || viewModel.isBusy)
             }
 
-            if let range = viewModel.appliedClipRange, !viewModel.hasUnappliedClipChanges {
-                Text("Clipped (\(SRTFormatter.formatShortTimestamp(range.end - range.start)))")
+            Divider()
+                .frame(height: 16)
+
+            HStack(spacing: 5) {
+                Image(systemName: "rectangle.portrait.on.rectangle.portrait.angled")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(viewModel.aspectRatioMode == .vertical9x16 ? Color.accentColor : .secondary)
+                Picker("", selection: $viewModel.aspectRatioMode) {
+                    ForEach(VideoAspectRatioMode.allCases) { mode in
+                        Text(mode.compactLabel).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 150)
+                .disabled(viewModel.videoURL == nil || viewModel.isBusy)
+                .help("Choose Original aspect ratio or 9:16 vertical crop for YouTube Shorts / Reels / TikTok")
+            }
+
+            if viewModel.isShowingShortsPreviewGuide {
+                HStack(spacing: 4) {
+                    Text("Pan")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Slider(value: $viewModel.horizontalCropFocus, in: 0...1)
+                        .frame(width: 68)
+                        .controlSize(.mini)
+                        .disabled(viewModel.isBusy)
+                        .help("Adjust horizontal crop position for the 9:16 Shorts frame (Left ↔ Center ↔ Right)")
+                    if abs(viewModel.horizontalCropFocus - 0.5) > 0.02 {
+                        Button {
+                            viewModel.horizontalCropFocus = 0.5
+                        } label: {
+                            Image(systemName: "scope")
+                                .font(.system(size: 10))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Center 9:16 crop")
+                    }
+                }
+            }
+
+            if viewModel.isClipped, !viewModel.hasUnappliedClipChanges {
+                let badgeText: String = {
+                    if let range = viewModel.appliedClipRange {
+                        let durStr = SRTFormatter.formatShortTimestamp(range.end - range.start)
+                        return viewModel.appliedAspectRatioMode == .vertical9x16 ? "9:16 • \(durStr)" : "Clipped (\(durStr))"
+                    }
+                    return "9:16 Shorts"
+                }()
+                Text(badgeText)
                     .font(.system(size: 10, weight: .semibold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -485,13 +616,16 @@ public struct ContentView: View {
             Button {
                 viewModel.clipCurrentVideo()
             } label: {
-                Label("Clip Video", systemImage: "scissors")
-                    .font(.system(size: 11, weight: .medium))
+                Label(
+                    viewModel.aspectRatioMode == .vertical9x16 ? "Cut 9:16 Short" : "Clip Video",
+                    systemImage: viewModel.aspectRatioMode == .vertical9x16 ? "rectangle.portrait.crop" : "scissors"
+                )
+                .font(.system(size: 11, weight: .medium))
             }
             .controlSize(.small)
             .buttonStyle(.bordered)
             .disabled(viewModel.videoURL == nil || viewModel.isBusy || !viewModel.hasUnappliedClipChanges)
-            .help("Clip the video to Start–End time now (also happens automatically before transcription)")
+            .help("Cut video to the selected Start–End range and aspect ratio (also applied automatically when transcribing or burning)")
 
             if viewModel.isClipped || viewModel.hasCustomClipRange {
                 Button("Reset") {

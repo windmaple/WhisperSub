@@ -100,6 +100,10 @@ public final class AppViewModel: ObservableObject {
 
     @Published public var clipStartText: String = "00:00.0"
     @Published public var clipEndText: String = ""
+    @Published public var aspectRatioMode: VideoAspectRatioMode = .original
+    @Published public var appliedAspectRatioMode: VideoAspectRatioMode = .original
+    @Published public var horizontalCropFocus: Double = 0.5
+    @Published public var appliedHorizontalCropFocus: Double = 0.5
     @Published public var isClipping: Bool = false
     @Published public var clipProgress: Double = 0.0
     @Published public var appliedClipRange: (start: TimeInterval, end: TimeInterval)?
@@ -245,7 +249,15 @@ public final class AppViewModel: ObservableObject {
     }
 
     public var isClipped: Bool {
-        appliedClipRange != nil
+        appliedClipRange != nil || appliedAspectRatioMode != .original
+    }
+
+    public var isShowingShortsPreviewGuide: Bool {
+        guard aspectRatioMode == .vertical9x16,
+              let meta = videoMetadata else {
+            return false
+        }
+        return aspectRatioMode.needsCrop(for: meta.size)
     }
 
     // MARK: - Video Selection
@@ -272,6 +284,8 @@ public final class AppViewModel: ObservableObject {
         lastBurnedVideoURL = nil
         lastClippedVideoURL = nil
         appliedClipRange = nil
+        appliedAspectRatioMode = .original
+        appliedHorizontalCropFocus = 0.5
         originalVideoURL = url
         originalVideoMetadata = nil
         videoURL = url
@@ -457,10 +471,16 @@ public final class AppViewModel: ObservableObject {
     }
 
     public var hasCustomClipRange: Bool {
-        ((try? resolveClipRange()) ?? nil) != nil
+        (((try? resolveClipRange()) ?? nil) != nil) || (aspectRatioMode != .original)
     }
 
     public var hasUnappliedClipChanges: Bool {
+        if aspectRatioMode != appliedAspectRatioMode {
+            return true
+        }
+        if aspectRatioMode == .vertical9x16 && abs(horizontalCropFocus - appliedHorizontalCropFocus) > 0.01 {
+            return true
+        }
         do {
             if let requested = try resolveClipRange() {
                 if let applied = appliedClipRange {
@@ -492,6 +512,10 @@ public final class AppViewModel: ObservableObject {
         cleanupTimeObserver()
         errorMessage = nil
         appliedClipRange = nil
+        aspectRatioMode = .original
+        appliedAspectRatioMode = .original
+        horizontalCropFocus = 0.5
+        appliedHorizontalCropFocus = 0.5
         lastClippedVideoURL = nil
         videoURL = origURL
         videoMetadata = originalVideoMetadata
@@ -530,8 +554,11 @@ public final class AppViewModel: ObservableObject {
             }
             do {
                 let clippedURL = try await performClipIfNeeded(forceIfCustom: true)
+                let shortsLabel = appliedAspectRatioMode == .vertical9x16 ? " • 9:16 Shorts" : ""
                 if let range = appliedClipRange, let meta = videoMetadata {
-                    statusMessage = "Clipped video to \(SRTFormatter.formatShortTimestamp(range.start)) – \(SRTFormatter.formatShortTimestamp(range.end)) (\(meta.formattedDuration)) → \(clippedURL.lastPathComponent)."
+                    statusMessage = "Clipped video to \(SRTFormatter.formatShortTimestamp(range.start)) – \(SRTFormatter.formatShortTimestamp(range.end)) (\(meta.formattedResolution), \(meta.formattedDuration)\(shortsLabel)) → \(clippedURL.lastPathComponent)."
+                } else if appliedAspectRatioMode != .original, let meta = videoMetadata {
+                    statusMessage = "Cut video to \(appliedAspectRatioMode.compactLabel) (\(meta.formattedResolution), \(meta.formattedDuration)) → \(clippedURL.lastPathComponent)."
                 } else {
                     statusMessage = "Full video range active (\(clippedURL.lastPathComponent))."
                 }
@@ -542,9 +569,15 @@ public final class AppViewModel: ObservableObject {
         }
     }
 
-    private func clippedOutputURL(for sourceURL: URL) -> URL {
+    private func clippedOutputURL(for sourceURL: URL, aspect: VideoAspectRatioMode) -> URL {
         let baseName = sourceURL.deletingPathExtension().lastPathComponent
-        let fileName = baseName.hasSuffix("_clipped") ? "\(baseName)_trim.mp4" : "\(baseName)_clipped.mp4"
+        let suffix: String
+        if aspect == .vertical9x16 {
+            suffix = baseName.hasSuffix("_shorts") ? "_9x16" : "_shorts"
+        } else {
+            suffix = baseName.hasSuffix("_clipped") ? "_trim" : "_clipped"
+        }
+        let fileName = "\(baseName)\(suffix).mp4"
         let parentDir = sourceURL.deletingLastPathComponent()
         if FileManager.default.isWritableFile(atPath: parentDir.path) {
             let candidate = parentDir.appendingPathComponent(fileName)
@@ -555,18 +588,22 @@ public final class AppViewModel: ObservableObject {
         return FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
     }
 
-    /// Clips the original video if a custom start/end time range is specified and not yet applied.
+    /// Clips the original video if a custom start/end time range or 9:16 Shorts aspect ratio is specified and not yet applied.
     private func performClipIfNeeded(forceIfCustom: Bool = false) async throws -> URL {
         guard let sourceURL = originalVideoURL ?? videoURL else {
             throw VideoSubtitleBurnerError.noVideoTrack
         }
 
         let requestedRange = try resolveClipRange()
+        let requestedAspect = aspectRatioMode
+        let requestedFocus = horizontalCropFocus
 
-        guard let range = requestedRange else {
-            if appliedClipRange != nil {
+        if requestedRange == nil && requestedAspect == .original {
+            if appliedClipRange != nil || appliedAspectRatioMode != .original {
                 cleanupTimeObserver()
                 appliedClipRange = nil
+                appliedAspectRatioMode = .original
+                appliedHorizontalCropFocus = 0.5
                 lastClippedVideoURL = nil
                 videoURL = sourceURL
                 videoMetadata = originalVideoMetadata
@@ -583,27 +620,41 @@ public final class AppViewModel: ObservableObject {
             return videoURL ?? sourceURL
         }
 
+        let fullDur = max(0.1, sourceVideoDuration)
+        let effectiveRange = requestedRange ?? (start: 0.0, end: fullDur)
+
+        let isRangeUnchanged: Bool = {
+            if let req = requestedRange, let app = appliedClipRange {
+                return abs(req.start - app.start) <= 0.05 && abs(req.end - app.end) <= 0.05
+            }
+            return requestedRange == nil && appliedClipRange == nil
+        }()
+        let isAspectUnchanged = (requestedAspect == appliedAspectRatioMode) &&
+            (requestedAspect == .original || abs(requestedFocus - appliedHorizontalCropFocus) <= 0.01)
+
         if !forceIfCustom,
-           let applied = appliedClipRange,
+           isRangeUnchanged,
+           isAspectUnchanged,
            let currentURL = videoURL,
-           abs(range.start - applied.start) <= 0.05,
-           abs(range.end - applied.end) <= 0.05,
            FileManager.default.fileExists(atPath: currentURL.path) {
             return currentURL
         }
 
-        let outURL = clippedOutputURL(for: sourceURL)
+        let outURL = clippedOutputURL(for: sourceURL, aspect: requestedAspect)
         let previousCues = self.cues
         let previousOffset = self.appliedClipRange?.start ?? 0.0
         isClipping = true
         clipProgress = 0.0
-        statusMessage = "Clipping video from \(SRTFormatter.formatShortTimestamp(range.start)) to \(SRTFormatter.formatShortTimestamp(range.end))…"
+        let aspectNote = requestedAspect == .vertical9x16 ? " (9:16 YouTube Shorts)" : ""
+        statusMessage = "Cutting video \(SRTFormatter.formatShortTimestamp(effectiveRange.start)) – \(SRTFormatter.formatShortTimestamp(effectiveRange.end))\(aspectNote)…"
 
         try await VideoSubtitleBurner.clipVideo(
             sourceURL: sourceURL,
             outputURL: outURL,
-            startTime: range.start,
-            endTime: range.end,
+            startTime: effectiveRange.start,
+            endTime: effectiveRange.end,
+            aspectRatioMode: requestedAspect,
+            horizontalFocus: requestedFocus,
             progressHandler: { [weak self] progress in
                 Task { @MainActor [weak self] in
                     self?.clipProgress = progress
@@ -617,27 +668,29 @@ public final class AppViewModel: ObservableObject {
         self.videoURL = outURL
         self.videoMetadata = clippedMeta
         self.lastClippedVideoURL = outURL
-        self.appliedClipRange = range
+        self.appliedClipRange = requestedRange
+        self.appliedAspectRatioMode = requestedAspect
+        self.appliedHorizontalCropFocus = requestedFocus
         self.lastSavedSRTURL = nil
         self.lastBurnedVideoURL = nil
         self.currentPlaybackTime = 0
 
         if !previousCues.isEmpty {
-            let clipDuration = max(0.1, range.end - range.start)
+            let clipDuration = max(0.1, effectiveRange.end - effectiveRange.start)
             var sliced: [SubtitleCue] = []
             for cue in previousCues {
                 let absStart = cue.startTime + previousOffset
                 let absEnd = cue.endTime + previousOffset
-                guard absEnd > range.start + 0.05, absStart < range.end - 0.05 else { continue }
-                let shiftedStart = max(0, absStart - range.start)
-                let shiftedEnd = min(clipDuration, absEnd - range.start)
+                guard absEnd > effectiveRange.start + 0.05, absStart < effectiveRange.end - 0.05 else { continue }
+                let shiftedStart = max(0, absStart - effectiveRange.start)
+                let shiftedEnd = min(clipDuration, absEnd - effectiveRange.start)
                 guard shiftedEnd > shiftedStart + 0.05 else { continue }
                 let shiftedWordTimings: [SubtitleWordTiming]? = cue.wordTimings?.compactMap { wt in
                     let absWStart = wt.startTime + previousOffset
                     let absWEnd = wt.endTime + previousOffset
-                    guard absWEnd > range.start + 0.01, absWStart < range.end - 0.01 else { return nil }
-                    let wStart = max(shiftedStart, absWStart - range.start)
-                    let wEnd = min(shiftedEnd, max(wStart + 0.02, absWEnd - range.start))
+                    guard absWEnd > effectiveRange.start + 0.01, absWStart < effectiveRange.end - 0.01 else { return nil }
+                    let wStart = max(shiftedStart, absWStart - effectiveRange.start)
+                    let wEnd = min(shiftedEnd, max(wStart + 0.02, absWEnd - effectiveRange.start))
                     return SubtitleWordTiming(word: wt.word, startTime: wStart, endTime: wEnd)
                 }
                 sliced.append(
@@ -1789,11 +1842,12 @@ public final class AppViewModel: ObservableObject {
         panel.title = "Export Video with Burned-In Subtitles"
         panel.allowedContentTypes = [.mpeg4Movie]
         let baseName = videoURL.deletingPathExtension().lastPathComponent
+        let shortsTag = (aspectRatioMode == .vertical9x16 && !baseName.lowercased().contains("shorts")) ? "_shorts" : ""
         if let lang = translatedLanguage, hasTranslatedCues, subtitleDisplayMode != .originalOnly {
             let suffix = subtitleDisplayMode == .bilingual ? "bilingual_\(lang.id)" : lang.id
-            panel.nameFieldStringValue = "\(baseName)_subtitled_\(suffix).mp4"
+            panel.nameFieldStringValue = "\(baseName)\(shortsTag)_subtitled_\(suffix).mp4"
         } else {
-            panel.nameFieldStringValue = "\(baseName)_subtitled.mp4"
+            panel.nameFieldStringValue = "\(baseName)\(shortsTag)_subtitled.mp4"
         }
 
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
@@ -1802,11 +1856,13 @@ public final class AppViewModel: ObservableObject {
         isBurning = true
         burnProgress = 0.0
         errorMessage = nil
-        statusMessage = "Burning \(cues.count) subtitles (\(subtitleDisplayMode.compactLabel)\(wordByWordSubtitles ? ", word-by-word" : "")) into video…"
-
         let currentCues = self.cues
         let currentDisplayMode = self.subtitleDisplayMode
         let currentWordByWord = self.wordByWordSubtitles
+        let currentAspect = self.aspectRatioMode
+        let currentFocus = self.horizontalCropFocus
+        let modeNote = "\(currentDisplayMode.compactLabel)\(currentWordByWord ? ", word-by-word" : "")\(currentAspect == .vertical9x16 ? ", 9:16 Shorts" : "")"
+        statusMessage = "Burning \(cues.count) subtitles (\(modeNote)) into video…"
 
         Task { [self] in
             defer {
@@ -1820,6 +1876,8 @@ public final class AppViewModel: ObservableObject {
                     cues: currentCues,
                     displayMode: currentDisplayMode,
                     wordByWord: currentWordByWord,
+                    aspectRatioMode: currentAspect,
+                    horizontalFocus: currentFocus,
                     progressHandler: { progress in
                         Task { @MainActor [weak self] in
                             self?.burnProgress = progress
@@ -1828,10 +1886,10 @@ public final class AppViewModel: ObservableObject {
                 )
                 self.burnProgress = 1.0
                 self.lastBurnedVideoURL = outputURL
-                self.statusMessage = "Burned subtitles (\(currentDisplayMode.compactLabel)\(currentWordByWord ? ", word-by-word" : "")) into \(outputURL.lastPathComponent)!"
+                self.statusMessage = "Burned subtitles (\(modeNote)) into \(outputURL.lastPathComponent)!"
                 self.postCompletionNotification(
                     title: "Subtitle Burn Complete",
-                    message: "Burned \(currentCues.count) subtitles (\(currentDisplayMode.compactLabel)\(currentWordByWord ? ", word-by-word" : "")) into \(outputURL.lastPathComponent).",
+                    message: "Burned \(currentCues.count) subtitles (\(modeNote)) into \(outputURL.lastPathComponent).",
                     systemImage: "flame.fill"
                 )
                 if !self.hasPlayablePreview {

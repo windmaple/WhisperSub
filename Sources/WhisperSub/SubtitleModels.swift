@@ -1,5 +1,65 @@
 import Foundation
+import CoreGraphics
 import NaturalLanguage
+
+public enum VideoAspectRatioMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case original = "Original"
+    case vertical9x16 = "9:16 Shorts"
+
+    public var id: String { rawValue }
+
+    public var compactLabel: String {
+        switch self {
+        case .original: return "Original"
+        case .vertical9x16: return "9:16 Shorts"
+        }
+    }
+
+    public var targetRatio: CGFloat? {
+        switch self {
+        case .original:
+            return nil
+        case .vertical9x16:
+            return 9.0 / 16.0
+        }
+    }
+
+    /// Computes the even-dimensioned crop rectangle in top-left video coordinates (`0...width`, `0...height`).
+    public func cropRect(for sourceSize: CGSize, horizontalFocus: Double = 0.5) -> CGRect {
+        let srcW = max(2, floor(sourceSize.width / 2.0) * 2.0)
+        let srcH = max(2, floor(sourceSize.height / 2.0) * 2.0)
+        guard let target = targetRatio, srcW > 0, srcH > 0 else {
+            return CGRect(x: 0, y: 0, width: srcW, height: srcH)
+        }
+
+        let currentRatio = srcW / srcH
+        if abs(currentRatio - target) < 0.015 {
+            return CGRect(x: 0, y: 0, width: srcW, height: srcH)
+        }
+
+        let clampedFocus = CGFloat(min(1.0, max(0.0, horizontalFocus)))
+        if currentRatio > target {
+            // Source is wider than 9:16 (e.g., 16:9 landscape -> crop left/right)
+            let cropH = srcH
+            let cropW = max(2, floor((cropH * target) / 2.0) * 2.0)
+            let cropX = floor(((srcW - cropW) * clampedFocus) / 2.0) * 2.0
+            return CGRect(x: max(0, min(srcW - cropW, cropX)), y: 0, width: cropW, height: cropH)
+        } else {
+            // Source is taller than 9:16 -> crop top/bottom
+            let cropW = srcW
+            let cropH = max(2, floor((cropW / target) / 2.0) * 2.0)
+            let cropY = floor(((srcH - cropH) * 0.5) / 2.0) * 2.0
+            return CGRect(x: 0, y: max(0, min(srcH - cropH, cropY)), width: cropW, height: cropH)
+        }
+    }
+
+    public func needsCrop(for sourceSize: CGSize) -> Bool {
+        guard let target = targetRatio, sourceSize.width > 0, sourceSize.height > 0 else {
+            return false
+        }
+        return abs((sourceSize.width / sourceSize.height) - target) >= 0.015
+    }
+}
 
 public struct SubtitleWordTiming: Codable, Equatable, Hashable, Sendable {
     public var word: String

@@ -206,8 +206,9 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
             NSGraphicsContext.restoreGraphicsState()
         }
 
+        let isVerticalFrame = width < fullHeight
         let minDimension = min(CGFloat(width), CGFloat(fullHeight))
-        let maxBoxWidth = round(CGFloat(width) * 0.84)
+        let maxBoxWidth = round(CGFloat(width) * (isVerticalFrame ? 0.88 : 0.84))
 
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(0.85)
@@ -228,7 +229,7 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
            let fullTrans,
            !fullTrans.isEmpty,
            fullTrans != fullOrig {
-            baseFontSize = max(16.0, min(60.0, round(minDimension * 0.038)))
+            baseFontSize = max(16.0, min(60.0, round(minDimension * (isVerticalFrame ? 0.043 : 0.038))))
             let originalFontSize = max(13.0, round(baseFontSize * 0.80))
             interBlockGap = max(4.0, round(baseFontSize * 0.16))
 
@@ -265,7 +266,7 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
             let visibleDisplay = cue.displayText(for: displayMode).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !fullDisplay.isEmpty else { return nil }
 
-            baseFontSize = max(18.0, min(72.0, round(minDimension * 0.044)))
+            baseFontSize = max(18.0, min(72.0, round(minDimension * (isVerticalFrame ? 0.050 : 0.044))))
             interBlockGap = 0
             origLayout = nil
             let font = NSFont.systemFont(ofSize: baseFontSize, weight: .semibold)
@@ -297,10 +298,10 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
         let horizontalPadding = max(16.0, round(baseFontSize * 0.65))
         let verticalPadding = max(10.0, round(baseFontSize * 0.36))
 
-        let pillWidth = min(CGFloat(width) * 0.92, textWidth + horizontalPadding * 2.0)
+        let pillWidth = min(CGFloat(width) * 0.94, textWidth + horizontalPadding * 2.0)
         let pillHeight = textHeight + verticalPadding * 2.0
 
-        let bottomMargin = max(24.0, round(CGFloat(fullHeight) * 0.065))
+        let bottomMargin = max(24.0, round(CGFloat(fullHeight) * (isVerticalFrame ? 0.105 : 0.065)))
         let pillX = round((CGFloat(width) - pillWidth) / 2.0)
         // In flipped top-down coordinates (y=0 is top of bitmap, y=bitmapHeight is bottom of frame):
         let pillY = max(4.0, CGFloat(bitmapHeight) - bottomMargin - pillHeight)
@@ -686,12 +687,14 @@ public enum VideoSubtitleBurner {
         }
     }
 
-    /// Creates an `AVVideoComposition` that dynamically renders and caches burned-in subtitle cues.
+    /// Creates an `AVVideoComposition` that dynamically renders and caches burned-in subtitle cues, optionally cropping to 9:16 YouTube Shorts.
     public static func makeVideoComposition(
         for asset: AVAsset,
         cues: [SubtitleCue],
         displayMode: SubtitleDisplayMode = .translatedOnly,
-        wordByWord: Bool = true
+        wordByWord: Bool = true,
+        aspectRatioMode: VideoAspectRatioMode = .original,
+        horizontalFocus: Double = 0.5
     ) async throws -> AVMutableVideoComposition {
         let tracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = tracks.first else {
@@ -701,10 +704,13 @@ public enum VideoSubtitleBurner {
         let naturalSize = try await videoTrack.load(.naturalSize)
         let preferredTransform = try await videoTrack.load(.preferredTransform)
         let transformedRect = CGRect(origin: .zero, size: naturalSize).applying(preferredTransform)
-        let renderSize = CGSize(
+        let fullSize = CGSize(
             width: max(2, abs(transformedRect.width).rounded()),
             height: max(2, abs(transformedRect.height).rounded())
         )
+        let cropRect = aspectRatioMode.cropRect(for: fullSize, horizontalFocus: horizontalFocus)
+        let renderSize = cropRect.size
+        let shouldCrop = aspectRatioMode.needsCrop(for: fullSize)
 
         let sortedBase = cues.sorted { $0.startTime < $1.startTime }
         let effectiveCues = wordByWord
@@ -715,28 +721,40 @@ public enum VideoSubtitleBurner {
         let composition = try await AVMutableVideoComposition.videoComposition(
             with: asset,
             applyingCIFiltersWithHandler: { request in
-                let source = request.sourceImage
-                let timeSeconds = CMTimeGetSeconds(request.compositionTime)
+                var baseFrame = request.sourceImage
+                let srcExtent = baseFrame.extent
+                if shouldCrop {
+                    let ciCropRect = CGRect(
+                        x: srcExtent.origin.x + cropRect.origin.x,
+                        y: srcExtent.origin.y + (srcExtent.height - cropRect.origin.y - cropRect.height),
+                        width: cropRect.width,
+                        height: cropRect.height
+                    )
+                    baseFrame = baseFrame
+                        .cropped(to: ciCropRect)
+                        .transformed(by: CGAffineTransform(translationX: -ciCropRect.origin.x, y: -ciCropRect.origin.y))
+                }
 
+                let timeSeconds = CMTimeGetSeconds(request.compositionTime)
                 guard let activeCue = overlayCache.activeCue(at: timeSeconds),
                       var overlay = overlayCache.overlayImage(for: activeCue)
                 else {
-                    request.finish(with: source, context: nil)
+                    request.finish(with: baseFrame, context: nil)
                     return
                 }
 
-                let extent = source.extent
+                let extent = baseFrame.extent
                 if extent.origin != .zero {
                     overlay = overlay.transformed(
                         by: CGAffineTransform(translationX: extent.origin.x, y: extent.origin.y)
                     )
                 }
 
-                let composited = overlay.composited(over: source).cropped(to: extent)
+                let composited = overlay.composited(over: baseFrame).cropped(to: extent)
                 request.finish(with: composited, context: nil)
             }
         )
-
+        composition.renderSize = renderSize
         return composition
     }
 
@@ -747,6 +765,8 @@ public enum VideoSubtitleBurner {
         cues: [SubtitleCue],
         displayMode: SubtitleDisplayMode = .translatedOnly,
         wordByWord: Bool = true,
+        aspectRatioMode: VideoAspectRatioMode = .original,
+        horizontalFocus: Double = 0.5,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -775,6 +795,8 @@ public enum VideoSubtitleBurner {
                 displayMode: displayMode,
                 videoSize: meta.size,
                 totalDuration: meta.duration,
+                aspectRatioMode: aspectRatioMode,
+                horizontalFocus: horizontalFocus,
                 progressHandler: progressHandler
             )
             return
@@ -785,7 +807,9 @@ public enum VideoSubtitleBurner {
                 for: asset,
                 cues: sortedBase,
                 displayMode: displayMode,
-                wordByWord: wordByWord
+                wordByWord: wordByWord,
+                aspectRatioMode: aspectRatioMode,
+                horizontalFocus: horizontalFocus
             )
 
             guard let exportSession = AVAssetExportSession(
@@ -838,6 +862,8 @@ public enum VideoSubtitleBurner {
                     displayMode: displayMode,
                     videoSize: meta.size,
                     totalDuration: meta.duration,
+                    aspectRatioMode: aspectRatioMode,
+                    horizontalFocus: horizontalFocus,
                     progressHandler: progressHandler
                 )
                 return
@@ -854,6 +880,8 @@ public enum VideoSubtitleBurner {
         displayMode: SubtitleDisplayMode = .translatedOnly,
         videoSize: CGSize,
         totalDuration: TimeInterval,
+        aspectRatioMode: VideoAspectRatioMode = .original,
+        horizontalFocus: Double = 0.5,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
         let tempSubDir = FileManager.default.temporaryDirectory
@@ -863,10 +891,14 @@ public enum VideoSubtitleBurner {
             try? FileManager.default.removeItem(at: tempSubDir)
         }
 
+        let cropRect = aspectRatioMode.cropRect(for: videoSize, horizontalFocus: horizontalFocus)
+        let shouldCrop = aspectRatioMode.needsCrop(for: videoSize)
+
         // Render subtitle overlays as transparent bottom-strip PNGs via CoreGraphics/AppKit so we do not depend on libass/subtitles filter in ffmpeg
-        let videoWidth = max(2, Int(videoSize.width.rounded()))
-        let videoHeight = max(2, Int(videoSize.height.rounded()))
-        let scaleDownFactor: CGFloat = videoWidth > 1920 ? (1920.0 / CGFloat(videoWidth)) : 1.0
+        let videoWidth = max(2, Int(cropRect.width.rounded()))
+        let videoHeight = max(2, Int(cropRect.height.rounded()))
+        let maxOverlayDim = max(videoWidth, videoHeight)
+        let scaleDownFactor: CGFloat = maxOverlayDim > 1920 ? (1920.0 / CGFloat(maxOverlayDim)) : 1.0
         let renderWidth = max(2, Int(round(CGFloat(videoWidth) * scaleDownFactor)))
         let renderHeight = max(2, Int(round(CGFloat(videoHeight) * scaleDownFactor)))
         let bandHeight = max(180, Int(ceil(CGFloat(renderHeight) * 0.42)))
@@ -924,11 +956,23 @@ public enum VideoSubtitleBurner {
         let concatURL = tempSubDir.appendingPathComponent("subtitles.ffconcat")
         try concatLines.joined(separator: "\n").write(to: concatURL, atomically: true, encoding: .utf8)
 
+        let baseVideoInput: String
+        let cropPrefix: String
+        if shouldCrop {
+            let cx = Int(cropRect.origin.x.rounded())
+            let cy = Int(cropRect.origin.y.rounded())
+            cropPrefix = "[0:v]crop=\(videoWidth):\(videoHeight):\(cx):\(cy)[vcrop];"
+            baseVideoInput = "[vcrop]"
+        } else {
+            cropPrefix = ""
+            baseVideoInput = "[0:v]"
+        }
+
         let filterComplex: String
         if renderWidth == videoWidth {
-            filterComplex = "[0:v][1:v]overlay=0:H-h:eof_action=pass[vout]"
+            filterComplex = "\(cropPrefix)\(baseVideoInput)[1:v]overlay=0:H-h:eof_action=pass[vout]"
         } else {
-            filterComplex = "[1:v]scale=\(videoWidth):\(scaledBandHeight):flags=bilinear[sub];[0:v][sub]overlay=0:H-h:eof_action=pass[vout]"
+            filterComplex = "\(cropPrefix)[1:v]scale=\(videoWidth):\(scaledBandHeight):flags=bilinear[sub];\(baseVideoInput)[sub]overlay=0:H-h:eof_action=pass[vout]"
         }
 
         try await Task.detached {
@@ -990,12 +1034,14 @@ public enum VideoSubtitleBurner {
         }.value
     }
 
-    /// Clips the video at `sourceURL` from `startTime` to `endTime` and writes an `.mp4` file to `outputURL`, reporting progress `0.0...1.0`.
+    /// Clips the video at `sourceURL` from `startTime` to `endTime` (and optionally crops to 9:16 YouTube Shorts) and writes an `.mp4` file to `outputURL`, reporting progress `0.0...1.0`.
     public static func clipVideo(
         sourceURL: URL,
         outputURL: URL,
         startTime: TimeInterval,
         endTime: TimeInterval,
+        aspectRatioMode: VideoAspectRatioMode = .original,
+        horizontalFocus: Double = 0.5,
         progressHandler: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws {
         let clampedStart = max(0, startTime)
@@ -1021,6 +1067,8 @@ public enum VideoSubtitleBurner {
                 outputURL: outputURL,
                 startTime: clampedStart,
                 duration: clipDuration,
+                aspectRatioMode: aspectRatioMode,
+                horizontalFocus: horizontalFocus,
                 progressHandler: progressHandler
             )
             return
@@ -1042,9 +1090,8 @@ public enum VideoSubtitleBurner {
             }
 
             try compVideoTrack.insertTimeRange(timeRange, of: sourceVideoTrack, at: .zero)
-            if let preferredTransform = try? await sourceVideoTrack.load(.preferredTransform) {
-                compVideoTrack.preferredTransform = preferredTransform
-            }
+            let preferredTransform = (try? await sourceVideoTrack.load(.preferredTransform)) ?? .identity
+            compVideoTrack.preferredTransform = preferredTransform
 
             let nativeAudioTracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
             if let sourceAudioTrack = nativeAudioTracks.first,
@@ -1053,6 +1100,38 @@ public enum VideoSubtitleBurner {
                    preferredTrackID: kCMPersistentTrackID_Invalid
                ) {
                 try? compAudioTrack.insertTimeRange(timeRange, of: sourceAudioTrack, at: .zero)
+            }
+
+            var cropComposition: AVMutableVideoComposition?
+            if aspectRatioMode != .original,
+               let naturalSize = try? await sourceVideoTrack.load(.naturalSize) {
+                let transformedRect = CGRect(origin: .zero, size: naturalSize).applying(preferredTransform)
+                let fullSize = CGSize(
+                    width: max(2, abs(transformedRect.width).rounded()),
+                    height: max(2, abs(transformedRect.height).rounded())
+                )
+                if aspectRatioMode.needsCrop(for: fullSize) {
+                    let cropRect = aspectRatioMode.cropRect(for: fullSize, horizontalFocus: horizontalFocus)
+                    let vc = try await AVMutableVideoComposition.videoComposition(
+                        with: composition,
+                        applyingCIFiltersWithHandler: { request in
+                            let src = request.sourceImage
+                            let srcExtent = src.extent
+                            let ciCropRect = CGRect(
+                                x: srcExtent.origin.x + cropRect.origin.x,
+                                y: srcExtent.origin.y + (srcExtent.height - cropRect.origin.y - cropRect.height),
+                                width: cropRect.width,
+                                height: cropRect.height
+                            )
+                            let cropped = src
+                                .cropped(to: ciCropRect)
+                                .transformed(by: CGAffineTransform(translationX: -ciCropRect.origin.x, y: -ciCropRect.origin.y))
+                            request.finish(with: cropped, context: nil)
+                        }
+                    )
+                    vc.renderSize = cropRect.size
+                    cropComposition = vc
+                }
             }
 
             guard let exportSession = AVAssetExportSession(
@@ -1065,6 +1144,9 @@ public enum VideoSubtitleBurner {
             exportSession.outputURL = outputURL
             exportSession.outputFileType = .mp4
             exportSession.shouldOptimizeForNetworkUse = true
+            if let cropComposition {
+                exportSession.videoComposition = cropComposition
+            }
 
             let progressTask = Task {
                 while !Task.isCancelled {
@@ -1096,6 +1178,8 @@ public enum VideoSubtitleBurner {
                     outputURL: outputURL,
                     startTime: clampedStart,
                     duration: clipDuration,
+                    aspectRatioMode: aspectRatioMode,
+                    horizontalFocus: horizontalFocus,
                     progressHandler: progressHandler
                 )
                 return
@@ -1110,18 +1194,29 @@ public enum VideoSubtitleBurner {
         outputURL: URL,
         startTime: TimeInterval,
         duration: TimeInterval,
+        aspectRatioMode: VideoAspectRatioMode = .original,
+        horizontalFocus: Double = 0.5,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
+        let clampedFocus = String(format: "%.3f", min(1.0, max(0.0, horizontalFocus)))
         try await Task.detached {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: ffmpegPath)
-            process.arguments = [
+            var args: [String] = [
                 "-nostdin",
                 "-loglevel", "error",
                 "-y",
                 "-ss", String(format: "%.3f", startTime),
                 "-i", sourceURL.path,
-                "-t", String(format: "%.3f", duration),
+                "-t", String(format: "%.3f", duration)
+            ]
+            if aspectRatioMode == .vertical9x16 {
+                args.append(contentsOf: [
+                    "-vf",
+                    "crop='min(iw,trunc(ih*9/16/2)*2)':'min(ih,trunc(iw*16/9/2)*2)':'(iw-ow)*\(clampedFocus)':'(ih-oh)/2'"
+                ])
+            }
+            args.append(contentsOf: [
                 "-c:v", "h264_videotoolbox",
                 "-q:v", "65",
                 "-c:a", "aac",
@@ -1130,7 +1225,8 @@ public enum VideoSubtitleBurner {
                 "-progress", "pipe:1",
                 "-nostats",
                 outputURL.path
-            ]
+            ])
+            process.arguments = args
 
             let outPipe = Pipe()
             let errPipe = Pipe()
