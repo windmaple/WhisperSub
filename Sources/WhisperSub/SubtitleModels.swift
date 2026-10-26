@@ -100,6 +100,10 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
     public var preReviewTranslatedText: String?
     public var isReviewedByGemma: Bool
     public var wordTimings: [SubtitleWordTiming]?
+    /// Optional full-phrase original text used to keep the on-screen subtitle box width and layout static during word-by-word reveal.
+    public var fullLayoutText: String?
+    /// Optional full-phrase translated text used to keep the on-screen subtitle box width and layout static during word-by-word reveal.
+    public var fullLayoutTranslatedText: String?
 
     public init(
         id: Int,
@@ -109,7 +113,9 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
         translatedText: String? = nil,
         preReviewTranslatedText: String? = nil,
         isReviewedByGemma: Bool = false,
-        wordTimings: [SubtitleWordTiming]? = nil
+        wordTimings: [SubtitleWordTiming]? = nil,
+        fullLayoutText: String? = nil,
+        fullLayoutTranslatedText: String? = nil
     ) {
         self.id = id
         self.startTime = max(0, startTime)
@@ -121,6 +127,10 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
         self.preReviewTranslatedText = (trimmedPreReview?.isEmpty == false) ? trimmedPreReview : nil
         self.isReviewedByGemma = isReviewedByGemma
         self.wordTimings = (wordTimings?.isEmpty == false) ? wordTimings : nil
+        let trimmedFullOrig = fullLayoutText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.fullLayoutText = (trimmedFullOrig?.isEmpty == false) ? trimmedFullOrig : nil
+        let trimmedFullTrans = fullLayoutTranslatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.fullLayoutTranslatedText = (trimmedFullTrans?.isEmpty == false) ? trimmedFullTrans : nil
     }
 
     public var hasTranslation: Bool {
@@ -157,6 +167,25 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
                 return text
             }
             return "\(text)\n\(translated)"
+        }
+    }
+
+    public func fullLayoutDisplayText(for mode: SubtitleDisplayMode) -> String {
+        let baseOrig = (fullLayoutText ?? text).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let baseTrans = (fullLayoutTranslatedText ?? translatedText)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !baseTrans.isEmpty else {
+            return baseOrig
+        }
+        switch mode {
+        case .originalOnly:
+            return baseOrig
+        case .translatedOnly:
+            return baseTrans
+        case .bilingual:
+            if baseTrans == baseOrig || baseOrig.hasSuffix("\n" + baseTrans) {
+                return baseOrig
+            }
+            return "\(baseOrig)\n\(baseTrans)"
         }
     }
 
@@ -582,7 +611,9 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
                             translatedText: progTrans,
                             preReviewTranslatedText: nil,
                             isReviewedByGemma: cue.isReviewedByGemma,
-                            wordTimings: nil
+                            wordTimings: nil,
+                            fullLayoutText: cue.text,
+                            fullLayoutTranslatedText: cue.translatedText
                         )
                     )
                 }
@@ -598,7 +629,9 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
                         translatedText: cue.translatedText,
                         preReviewTranslatedText: cue.preReviewTranslatedText,
                         isReviewedByGemma: cue.isReviewedByGemma,
-                        wordTimings: nil
+                        wordTimings: nil,
+                        fullLayoutText: cue.text,
+                        fullLayoutTranslatedText: cue.translatedText
                     )
                 )
             } else {
@@ -615,7 +648,9 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
                 translatedText: expanded[i].translatedText,
                 preReviewTranslatedText: expanded[i].preReviewTranslatedText,
                 isReviewedByGemma: expanded[i].isReviewedByGemma,
-                wordTimings: nil
+                wordTimings: nil,
+                fullLayoutText: expanded[i].fullLayoutText,
+                fullLayoutTranslatedText: expanded[i].fullLayoutTranslatedText
             )
         }
         return expanded

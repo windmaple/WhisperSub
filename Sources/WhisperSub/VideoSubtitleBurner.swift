@@ -129,6 +129,46 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
         }
     }
 
+    private static func makeProgressiveAttributedString(
+        fullText: String,
+        visiblePrefix: String,
+        font: NSFont,
+        visibleColor: NSColor,
+        paragraphStyle: NSParagraphStyle,
+        shadow: NSShadow
+    ) -> NSAttributedString {
+        let cleanFull = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanVisible = visiblePrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let hiddenAttrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.clear,
+            .paragraphStyle: paragraphStyle
+        ]
+        let visibleAttrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: visibleColor,
+            .paragraphStyle: paragraphStyle,
+            .shadow: shadow
+        ]
+
+        guard !cleanFull.isEmpty else {
+            return NSAttributedString(string: cleanVisible, attributes: visibleAttrs)
+        }
+
+        let visibleCharCount = cleanFull.hasPrefix(cleanVisible)
+            ? cleanVisible.count
+            : min(cleanFull.count, cleanVisible.count)
+
+        let result = NSMutableAttributedString(string: cleanFull, attributes: hiddenAttrs)
+        if visibleCharCount > 0 {
+            let prefixString = String(cleanFull.prefix(visibleCharCount))
+            let nsPrefixLength = (prefixString as NSString).length
+            result.setAttributes(visibleAttrs, range: NSRange(location: 0, length: nsPrefixLength))
+        }
+        return result
+    }
+
     public static func renderCueCGImage(
         cue: SubtitleCue,
         displayMode: SubtitleDisplayMode,
@@ -179,11 +219,15 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
         let primaryLayout: TextBlockLayout
         let interBlockGap: CGFloat
 
+        let fullOrig = (cue.fullLayoutText ?? cue.text).trimmingCharacters(in: .whitespacesAndNewlines)
+        let visibleOrig = cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fullTrans = (cue.fullLayoutTranslatedText ?? cue.translatedText)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visibleTrans = cue.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
         if displayMode == .bilingual,
-           let translated = cue.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !translated.isEmpty,
-           translated != cue.text {
-            let origTrimmed = cue.text.trimmingCharacters(in: .whitespacesAndNewlines)
+           let fullTrans,
+           !fullTrans.isEmpty,
+           fullTrans != fullOrig {
             baseFontSize = max(16.0, min(60.0, round(minDimension * 0.038)))
             let originalFontSize = max(13.0, round(baseFontSize * 0.80))
             interBlockGap = max(4.0, round(baseFontSize * 0.16))
@@ -193,31 +237,33 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
             paragraphStyle.lineBreakMode = .byWordWrapping
             paragraphStyle.lineSpacing = max(2.0, round(baseFontSize * 0.10))
 
-            let originalAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: originalFontSize, weight: .medium),
-                .foregroundColor: NSColor.white.withAlphaComponent(0.86),
-                .paragraphStyle: paragraphStyle,
-                .shadow: shadow
-            ]
-            let translatedAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: baseFontSize, weight: .semibold),
-                .foregroundColor: NSColor.white,
-                .paragraphStyle: paragraphStyle,
-                .shadow: shadow
-            ]
-
-            if !origTrimmed.isEmpty {
-                let origAttr = NSAttributedString(string: origTrimmed, attributes: originalAttrs)
+            if !fullOrig.isEmpty {
+                let origAttr = makeProgressiveAttributedString(
+                    fullText: fullOrig,
+                    visiblePrefix: visibleOrig,
+                    font: NSFont.systemFont(ofSize: originalFontSize, weight: .medium),
+                    visibleColor: NSColor.white.withAlphaComponent(0.86),
+                    paragraphStyle: paragraphStyle,
+                    shadow: shadow
+                )
                 origLayout = TextBlockLayout(attributedString: origAttr, maxWidth: maxBoxWidth)
             } else {
                 origLayout = nil
             }
 
-            let transAttr = NSAttributedString(string: translated, attributes: translatedAttrs)
+            let transAttr = makeProgressiveAttributedString(
+                fullText: fullTrans,
+                visiblePrefix: visibleTrans,
+                font: NSFont.systemFont(ofSize: baseFontSize, weight: .semibold),
+                visibleColor: NSColor.white,
+                paragraphStyle: paragraphStyle,
+                shadow: shadow
+            )
             primaryLayout = TextBlockLayout(attributedString: transAttr, maxWidth: maxBoxWidth)
         } else {
-            let cleanText = cue.displayText(for: displayMode).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !cleanText.isEmpty else { return nil }
+            let fullDisplay = cue.fullLayoutDisplayText(for: displayMode).trimmingCharacters(in: .whitespacesAndNewlines)
+            let visibleDisplay = cue.displayText(for: displayMode).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fullDisplay.isEmpty else { return nil }
 
             baseFontSize = max(18.0, min(72.0, round(minDimension * 0.044)))
             interBlockGap = 0
@@ -229,13 +275,14 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
             paragraphStyle.lineBreakMode = .byWordWrapping
             paragraphStyle.lineSpacing = max(2.0, round(baseFontSize * 0.12))
 
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: NSColor.white,
-                .paragraphStyle: paragraphStyle,
-                .shadow: shadow
-            ]
-            let attrString = NSAttributedString(string: cleanText, attributes: attributes)
+            let attrString = makeProgressiveAttributedString(
+                fullText: fullDisplay,
+                visiblePrefix: visibleDisplay,
+                font: font,
+                visibleColor: NSColor.white,
+                paragraphStyle: paragraphStyle,
+                shadow: shadow
+            )
             primaryLayout = TextBlockLayout(attributedString: attrString, maxWidth: maxBoxWidth)
         }
 

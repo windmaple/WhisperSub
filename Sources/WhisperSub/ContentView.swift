@@ -254,40 +254,47 @@ public struct ContentView: View {
             }
 
             if let cue = viewModel.activeSubtitleCue, !viewModel.isPlayingBurnedVideo {
+                let fullOrig = (cue.fullLayoutText ?? cue.text).trimmingCharacters(in: .whitespacesAndNewlines)
+                let fullTrans = (cue.fullLayoutTranslatedText ?? cue.translatedText)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let fullSingleDisplay = cue.fullLayoutDisplayText(for: viewModel.subtitleDisplayMode)
+
                 let liveOriginal = viewModel.wordByWordSubtitles
                     ? cue.progressiveOriginalText(at: viewModel.currentPlaybackTime)
-                    : cue.text
+                    : fullOrig
                 let liveTranslated = viewModel.wordByWordSubtitles
-                    ? cue.progressiveTranslatedText(at: viewModel.currentPlaybackTime)
-                    : cue.translatedText
+                    ? (cue.progressiveTranslatedText(at: viewModel.currentPlaybackTime) ?? "")
+                    : (fullTrans ?? "")
                 let liveSingleDisplay = viewModel.wordByWordSubtitles
                     ? cue.progressiveDisplayText(at: viewModel.currentPlaybackTime, for: viewModel.subtitleDisplayMode)
-                    : cue.displayText(for: viewModel.subtitleDisplayMode)
+                    : fullSingleDisplay
 
                 Group {
                     if viewModel.subtitleDisplayMode == .bilingual,
-                       let translated = liveTranslated,
-                       !translated.isEmpty,
-                       translated != liveOriginal {
+                       let fullTrans,
+                       !fullTrans.isEmpty,
+                       fullTrans != fullOrig {
                         VStack(spacing: 3) {
-                            Text(liveOriginal)
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.86))
-                                .multilineTextAlignment(.center)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text(translated)
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .multilineTextAlignment(.center)
-                                .fixedSize(horizontal: false, vertical: true)
+                            staticWidthProgressiveText(
+                                fullText: fullOrig,
+                                visiblePrefix: liveOriginal,
+                                font: .system(size: 13, weight: .medium),
+                                visibleColor: .white.opacity(0.86)
+                            )
+                            staticWidthProgressiveText(
+                                fullText: fullTrans,
+                                visiblePrefix: liveTranslated,
+                                font: .system(size: 15, weight: .semibold),
+                                visibleColor: .white
+                            )
                         }
                         .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        Text(liveSingleDisplay)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
+                        staticWidthProgressiveText(
+                            fullText: fullSingleDisplay,
+                            visiblePrefix: liveSingleDisplay,
+                            font: .system(size: 15, weight: .semibold),
+                            visibleColor: .white
+                        )
                     }
                 }
                 .padding(.horizontal, 14)
@@ -305,6 +312,64 @@ public struct ContentView: View {
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers: providers)
         }
+    }
+
+    @ViewBuilder
+    private func staticWidthProgressiveText(
+        fullText: String,
+        visiblePrefix: String,
+        font: Font,
+        visibleColor: Color
+    ) -> some View {
+        let cleanFull = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        Text(cleanFull)
+            .font(font)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .hidden()
+            .overlay(alignment: .center) {
+                Text(
+                    makeProgressiveAttributedString(
+                        fullText: cleanFull,
+                        visiblePrefix: visiblePrefix,
+                        visibleColor: visibleColor
+                    )
+                )
+                .font(font)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+    }
+
+    private func makeProgressiveAttributedString(
+        fullText: String,
+        visiblePrefix: String,
+        visibleColor: Color
+    ) -> AttributedString {
+        let cleanFull = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanVisible = visiblePrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanFull.isEmpty else {
+            var fallback = AttributedString(cleanVisible)
+            fallback.foregroundColor = visibleColor
+            return fallback
+        }
+
+        let visibleCount = cleanFull.hasPrefix(cleanVisible)
+            ? cleanVisible.count
+            : min(cleanFull.count, cleanVisible.count)
+
+        let visiblePart = String(cleanFull.prefix(visibleCount))
+        let hiddenPart = String(cleanFull.dropFirst(visibleCount))
+
+        var result = AttributedString(visiblePart)
+        result.foregroundColor = visibleColor
+
+        if !hiddenPart.isEmpty {
+            var hiddenAttr = AttributedString(hiddenPart)
+            hiddenAttr.foregroundColor = .clear
+            result.append(hiddenAttr)
+        }
+        return result
     }
 
     private var videoMetadataBar: some View {
