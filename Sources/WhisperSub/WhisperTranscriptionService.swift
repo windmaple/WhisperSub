@@ -289,7 +289,7 @@ public final class WhisperTranscriptionService: ObservableObject {
                     detectLanguage: detectedLanguage == nil,
                     skipSpecialTokens: true,
                     withoutTimestamps: false,
-                    wordTimestamps: false,
+                    wordTimestamps: true,
                     suppressBlank: true,
                     chunkingStrategy: .vad
                 )
@@ -330,7 +330,7 @@ public final class WhisperTranscriptionService: ObservableObject {
         }
     }
 
-    /// Converts WhisperKit `TranscriptionResult` segments into clean, well-timed `SubtitleCue`s.
+    /// Converts WhisperKit `TranscriptionResult` segments into clean, voice-aligned `SubtitleCue`s with per-word DTW timings.
     nonisolated private static func buildSubtitleCues(from results: [TranscriptionResult]) -> [SubtitleCue] {
         buildSubtitleCues(fromSegments: results.flatMap { $0.segments })
     }
@@ -344,23 +344,198 @@ public final class WhisperTranscriptionService: ObservableObject {
             let cleaned = SRTFormatter.cleanWhisperText(segment.text)
             guard !cleaned.isEmpty else { continue }
 
-            let start = TimeInterval(segment.start)
-            let end = max(start + 0.25, TimeInterval(segment.end))
+            let segStart = max(0, TimeInterval(segment.start))
+            let segEnd = max(segStart + 0.20, TimeInterval(segment.end))
 
-            let subSegments = splitLongCaption(text: cleaned, start: start, end: end, maxChars: 88)
-            for sub in subSegments {
-                rawCues.append(
-                    SubtitleCue(
-                        id: rawCues.count + 1,
-                        startTime: sub.start,
-                        endTime: sub.end,
-                        text: sub.text
+            let extractedWords = extractCleanWordTimings(from: segment.words)
+            if !extractedWords.isEmpty {
+                let phraseChunks = splitWordsIntoVoiceAlignedPhrases(extractedWords, segmentEnd: segEnd)
+                for chunk in phraseChunks {
+                    rawCues.append(
+                        SubtitleCue(
+                            id: rawCues.count + 1,
+                            startTime: chunk.start,
+                            endTime: chunk.end,
+                            text: chunk.text,
+                            wordTimings: chunk.words
+                        )
                     )
-                )
+                }
+            } else {
+                let subSegments = splitLongCaption(text: cleaned, start: segStart, end: segEnd, maxChars: 56)
+                for sub in subSegments {
+                    let synthesized = SubtitleCue.synthesizeWordTimings(
+                        for: sub.text,
+                        startTime: sub.start,
+                        endTime: sub.end
+                    )
+                    rawCues.append(
+                        SubtitleCue(
+                            id: rawCues.count + 1,
+                            startTime: sub.start,
+                            endTime: sub.end,
+                            text: sub.text,
+                            wordTimings: synthesized
+                        )
+                    )
+                }
+            }
+        }
+
+        // Prevent any cue's reading-hold tail from overlapping the next cue's spoken onset
+        if rawCues.count >= 2 {
+            for i in 0..<(rawCues.count - 1) {
+                let nextStart = rawCues[i + 1].startTime
+                if rawCues[i].endTime > nextStart && nextStart > rawCues[i].startTime + 0.06 {
+                    rawCues[i].endTime = nextStart
+                    if let timings = rawCues[i].wordTimings {
+                        rawCues[i].wordTimings = SubtitleCue.normalizeWordTimings(
+                            timings,
+                            cueStart: rawCues[i].startTime,
+                            cueEnd: rawCues[i].endTime
+                        )
+                    }
+                }
             }
         }
 
         return rawCues
+    }
+
+    nonisolated private static func containsCJK(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            if (0x4E00...0x9FFF).contains(scalar.value) ||
+               (0x3400...0x4DBF).contains(scalar.value) ||
+               (0x3040...0x30FF).contains(scalar.value) ||
+               (0xAC00...0xD7AF).contains(scalar.value) {
+                return true
+            }
+        }
+        return false
+    }
+
+    nonisolated private static func needsLeadingSpace(after prev: String, before curr: String) -> Bool {
+        guard let prevLast = prev.unicodeScalars.last,
+              let currFirst = curr.unicodeScalars.first else {
+            return false
+        }
+        if CharacterSet.whitespacesAndNewlines.contains(prevLast) || CharacterSet.whitespacesAndNewlines.contains(currFirst) {
+            return false
+        }
+        // Do not insert space before closing/clause punctuation or apostrophes
+        let noSpaceBefore = CharacterSet(charactersIn: ",.;:!?)]}'’\"”»，。；：！？、）》」』】")
+        if noSpaceBefore.contains(currFirst) {
+            return false
+        }
+        // Do not insert space between CJK characters
+        let prevIsCJK = (0x3000...0x9FFF).contains(prevLast.value) || (0xAC00...0xD7AF).contains(prevLast.value) || (0xFF00...0xFFEF).contains(prevLast.value)
+        let currIsCJK = (0x3000...0x9FFF).contains(currFirst.value) || (0xAC00...0xD7AF).contains(currFirst.value) || (0xFF00...0xFFEF).contains(currFirst.value)
+        if prevIsCJK && currIsCJK {
+            return false
+        }
+        return CharacterSet.alphanumerics.contains(prevLast) || CharacterSet.punctuationCharacters.contains(prevLast)
+    }
+
+    nonisolated private static func extractCleanWordTimings(from rawWords: [WordTiming]?) -> [SubtitleWordTiming] {
+        guard let rawWords, !rawWords.isEmpty else { return [] }
+        var cleanedWords: [SubtitleWordTiming] = []
+        cleanedWords.reserveCapacity(rawWords.count)
+
+        for item in rawWords {
+            let hadLeadingSpace = item.word.unicodeScalars.first.map { CharacterSet.whitespaces.contains($0) } ?? false
+            let cleanedToken = SRTFormatter.cleanWhisperText(item.word)
+            guard !cleanedToken.isEmpty else { continue }
+
+            let start = max(0, TimeInterval(item.start))
+            let end = max(start + 0.02, TimeInterval(item.end))
+
+            // If token is standalone punctuation, attach it to the previous word
+            let isPurePunct = cleanedToken.unicodeScalars.allSatisfy { CharacterSet.punctuationCharacters.contains($0) }
+            if isPurePunct, !cleanedWords.isEmpty {
+                cleanedWords[cleanedWords.count - 1].word += cleanedToken
+                cleanedWords[cleanedWords.count - 1].endTime = max(cleanedWords[cleanedWords.count - 1].endTime, end)
+                continue
+            }
+
+            let formattedWord: String
+            if cleanedWords.isEmpty {
+                formattedWord = cleanedToken
+            } else if hadLeadingSpace || needsLeadingSpace(after: cleanedWords[cleanedWords.count - 1].word, before: cleanedToken) {
+                formattedWord = " " + cleanedToken
+            } else {
+                formattedWord = cleanedToken
+            }
+
+            cleanedWords.append(SubtitleWordTiming(word: formattedWord, startTime: start, endTime: end))
+        }
+
+        return cleanedWords
+    }
+
+    nonisolated private static func splitWordsIntoVoiceAlignedPhrases(
+        _ words: [SubtitleWordTiming],
+        segmentEnd: TimeInterval
+    ) -> [(start: TimeInterval, end: TimeInterval, text: String, words: [SubtitleWordTiming])] {
+        guard !words.isEmpty else { return [] }
+
+        var groups: [[SubtitleWordTiming]] = []
+        var current: [SubtitleWordTiming] = []
+
+        for i in 0..<words.count {
+            current.append(words[i])
+            guard i + 1 < words.count else { break }
+
+            let curr = words[i]
+            let next = words[i + 1]
+            let pauseGap = next.startTime - curr.endTime
+            let joinedText = current.map(\.word).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            let isCJK = containsCJK(joinedText)
+            let maxChars = isCJK ? 26 : 54
+            let maxWords = isCJK ? 14 : 9
+
+            let trimmedCurr = curr.word.trimmingCharacters(in: .whitespacesAndNewlines)
+            let endsWithSentencePunct = trimmedCurr.last.map { ".!?。！？…".contains($0) } ?? false
+            let endsWithClausePunct = trimmedCurr.last.map { ",;:—，；：、".contains($0) } ?? false
+
+            let shouldSplitOnPause = pauseGap >= 0.48
+            let shouldSplitOnSentence = endsWithSentencePunct && (pauseGap >= 0.10 || joinedText.count >= (isCJK ? 8 : 16))
+            let shouldSplitOnClause = endsWithClausePunct && (pauseGap >= 0.20 || joinedText.count >= (isCJK ? 13 : 28))
+            let shouldSplitOnLength = (joinedText.count + next.word.count > maxChars) || (current.count >= maxWords)
+
+            if shouldSplitOnPause || shouldSplitOnSentence || shouldSplitOnClause || shouldSplitOnLength {
+                groups.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty {
+            groups.append(current)
+        }
+
+        var output: [(start: TimeInterval, end: TimeInterval, text: String, words: [SubtitleWordTiming])] = []
+        output.reserveCapacity(groups.count)
+
+        for (gIdx, group) in groups.enumerated() {
+            guard let first = group.first, let last = group.last else { continue }
+            var normalizedWords = group
+            normalizedWords[0].word = normalizedWords[0].word.trimmingCharacters(in: .whitespacesAndNewlines)
+            let phraseText = normalizedWords.map(\.word).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !phraseText.isEmpty else { continue }
+
+            let phraseStart = max(0, first.startTime)
+            let nextPhraseStart = (gIdx + 1 < groups.count) ? groups[gIdx + 1].first?.startTime : nil
+            let naturalTail = min(segmentEnd, last.endTime + 0.10)
+            let cappedEnd = nextPhraseStart.map { min(naturalTail, max(last.endTime, $0 - 0.02)) } ?? naturalTail
+            let phraseEnd = max(phraseStart + 0.20, last.endTime, cappedEnd)
+
+            let finalizedWords = SubtitleCue.normalizeWordTimings(
+                normalizedWords,
+                cueStart: phraseStart,
+                cueEnd: phraseEnd
+            )
+            output.append((start: phraseStart, end: phraseEnd, text: phraseText, words: finalizedWords))
+        }
+
+        return output
     }
 
     nonisolated private static func splitLongCaption(

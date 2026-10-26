@@ -1,4 +1,17 @@
 import Foundation
+import NaturalLanguage
+
+public struct SubtitleWordTiming: Codable, Equatable, Hashable, Sendable {
+    public var word: String
+    public var startTime: TimeInterval
+    public var endTime: TimeInterval
+
+    public init(word: String, startTime: TimeInterval, endTime: TimeInterval) {
+        self.word = word
+        self.startTime = max(0, startTime)
+        self.endTime = max(self.startTime + 0.02, endTime)
+    }
+}
 
 public enum SubtitleDisplayMode: String, CaseIterable, Identifiable, Sendable {
     case translatedOnly = "Translated Only"
@@ -86,6 +99,7 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
     public var translatedText: String?
     public var preReviewTranslatedText: String?
     public var isReviewedByGemma: Bool
+    public var wordTimings: [SubtitleWordTiming]?
 
     public init(
         id: Int,
@@ -94,17 +108,19 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
         text: String,
         translatedText: String? = nil,
         preReviewTranslatedText: String? = nil,
-        isReviewedByGemma: Bool = false
+        isReviewedByGemma: Bool = false,
+        wordTimings: [SubtitleWordTiming]? = nil
     ) {
         self.id = id
         self.startTime = max(0, startTime)
-        self.endTime = max(self.startTime + 0.05, endTime)
+        self.endTime = max(self.startTime + 0.04, endTime)
         self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedTranslation = translatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.translatedText = (trimmedTranslation?.isEmpty == false) ? trimmedTranslation : nil
         let trimmedPreReview = preReviewTranslatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.preReviewTranslatedText = (trimmedPreReview?.isEmpty == false) ? trimmedPreReview : nil
         self.isReviewedByGemma = isReviewedByGemma
+        self.wordTimings = (wordTimings?.isEmpty == false) ? wordTimings : nil
     }
 
     public var hasTranslation: Bool {
@@ -150,6 +166,459 @@ public struct SubtitleCue: Identifiable, Codable, Equatable, Hashable, Sendable 
 
     public var shortTimeRange: String {
         "\(SRTFormatter.formatShortTimestamp(startTime)) – \(SRTFormatter.formatShortTimestamp(endTime))"
+    }
+
+    // MARK: - Word-by-Word Voice Alignment & Progressive Reveal
+
+    /// Resolved word-level timings for `text` (original language).
+    /// Uses Whisper DTW cross-attention `wordTimings` when they match `text`, or synthesizes voice-aligned word timings anchored to `wordTimings`.
+    public var resolvedOriginalWordTimings: [SubtitleWordTiming] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        if let stored = wordTimings, !stored.isEmpty {
+            let joinedStored = stored.map(\.word).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            if Self.normalizedComparisonString(joinedStored) == Self.normalizedComparisonString(trimmed) {
+                return Self.normalizeWordTimings(stored, cueStart: startTime, cueEnd: endTime)
+            }
+            return Self.synthesizeWordTimings(
+                for: trimmed,
+                startTime: startTime,
+                endTime: endTime,
+                referenceTimings: Self.normalizeWordTimings(stored, cueStart: startTime, cueEnd: endTime)
+            )
+        }
+
+        return Self.synthesizeWordTimings(
+            for: trimmed,
+            startTime: startTime,
+            endTime: endTime,
+            referenceTimings: nil
+        )
+    }
+
+    /// Resolved word-level timings for `translatedText`, mapped onto the spoken voice cadence of `resolvedOriginalWordTimings`.
+    public var resolvedTranslatedWordTimings: [SubtitleWordTiming]? {
+        guard let translated = translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !translated.isEmpty else {
+            return nil
+        }
+        let origTimings = resolvedOriginalWordTimings
+        return Self.synthesizeWordTimings(
+            for: translated,
+            startTime: startTime,
+            endTime: endTime,
+            referenceTimings: origTimings
+        )
+    }
+
+    /// Returns the index of the currently active word in `resolvedOriginalWordTimings` at `timeSeconds`.
+    public func activeOriginalWordIndex(at timeSeconds: TimeInterval) -> Int? {
+        let words = resolvedOriginalWordTimings
+        guard !words.isEmpty else { return nil }
+        var activeIdx = 0
+        for (idx, w) in words.enumerated() {
+            if timeSeconds + 0.008 >= w.startTime {
+                activeIdx = idx
+            } else {
+                break
+            }
+        }
+        return activeIdx
+    }
+
+    /// Returns the cumulative original text spoken up to `timeSeconds` (at least the first word once the cue starts).
+    public func progressiveOriginalText(at timeSeconds: TimeInterval) -> String {
+        let words = resolvedOriginalWordTimings
+        guard !words.isEmpty else { return text }
+        let count = visibleWordCount(in: words, at: timeSeconds)
+        return words.prefix(count).map(\.word).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Returns the cumulative translated text spoken up to `timeSeconds` (at least the first word once the cue starts).
+    public func progressiveTranslatedText(at timeSeconds: TimeInterval) -> String? {
+        guard let transWords = resolvedTranslatedWordTimings, !transWords.isEmpty else {
+            return translatedText
+        }
+        let count = visibleWordCount(in: transWords, at: timeSeconds)
+        return transWords.prefix(count).map(\.word).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Returns the progressive display string at `timeSeconds` for the specified `SubtitleDisplayMode`.
+    public func progressiveDisplayText(at timeSeconds: TimeInterval, for mode: SubtitleDisplayMode) -> String {
+        let progOrig = progressiveOriginalText(at: timeSeconds)
+        guard let progTrans = progressiveTranslatedText(at: timeSeconds)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !progTrans.isEmpty else {
+            return progOrig
+        }
+        switch mode {
+        case .originalOnly:
+            return progOrig
+        case .translatedOnly:
+            return progTrans
+        case .bilingual:
+            if progTrans == progOrig || progOrig.hasSuffix("\n" + progTrans) {
+                return progOrig
+            }
+            return "\(progOrig)\n\(progTrans)"
+        }
+    }
+
+    private func visibleWordCount(in words: [SubtitleWordTiming], at timeSeconds: TimeInterval) -> Int {
+        guard !words.isEmpty else { return 0 }
+        var count = 1
+        for (idx, w) in words.enumerated() {
+            if timeSeconds + 0.008 >= w.startTime {
+                count = idx + 1
+            } else {
+                break
+            }
+        }
+        return min(words.count, max(1, count))
+    }
+
+    private static func normalizedComparisonString(_ str: String) -> String {
+        str.components(separatedBy: .whitespacesAndNewlines).joined().lowercased()
+    }
+
+    /// Normalizes a sequence of word timings so timestamps are monotonically increasing within `[cueStart, cueEnd]`
+    /// and any simultaneous DTW tokens are smoothly spaced across their active span.
+    public static func normalizeWordTimings(
+        _ timings: [SubtitleWordTiming],
+        cueStart: TimeInterval,
+        cueEnd: TimeInterval
+    ) -> [SubtitleWordTiming] {
+        guard !timings.isEmpty else { return [] }
+        let safeStart = max(0, cueStart)
+        let safeEnd = max(safeStart + 0.04, cueEnd)
+        let count = timings.count
+
+        if count == 1 {
+            return [SubtitleWordTiming(word: timings[0].word, startTime: safeStart, endTime: safeEnd)]
+        }
+
+        var starts = timings.map { min(safeEnd, max(safeStart, $0.startTime)) }
+        var ends = timings.map { min(safeEnd, max(safeStart, $0.endTime)) }
+        starts[0] = safeStart
+        ends[count - 1] = max(ends[count - 1], safeEnd)
+
+        // Ensure non-decreasing start times
+        for i in 1..<count {
+            if starts[i] < starts[i - 1] {
+                starts[i] = starts[i - 1]
+            }
+        }
+
+        // Smooth out runs of words that received identical or near-identical (< 0.035s) start timestamps from DTW
+        let minStep: TimeInterval = min(0.04, (safeEnd - safeStart) / Double(max(1, count)))
+        var idx = 0
+        while idx < count {
+            var runEndIdx = idx
+            while runEndIdx + 1 < count && (starts[runEndIdx + 1] - starts[runEndIdx]) < minStep * 0.85 {
+                runEndIdx += 1
+            }
+            if runEndIdx > idx {
+                let runStart = starts[idx]
+                let rawLimit = (runEndIdx + 1 < count) ? starts[runEndIdx + 1] : safeEnd
+                let maxEndInRun = ends[idx...runEndIdx].max() ?? runStart
+                let spanEnd = min(safeEnd, max(rawLimit, maxEndInRun, runStart + minStep * Double(runEndIdx - idx + 1)))
+                let runSlice = Array(timings[idx...runEndIdx])
+                let weights = runSlice.map { speakingWeight(for: $0.word) }
+                let totalWeight = max(0.01, weights.reduce(0, +))
+                var accum = 0.0
+                for offset in 0..<runSlice.count {
+                    starts[idx + offset] = runStart + (spanEnd - runStart) * (accum / totalWeight)
+                    accum += weights[offset]
+                }
+            }
+            idx = runEndIdx + 1
+        }
+
+        // Final forward/backward clamp so every word has a distinct startTime in [safeStart, safeEnd)
+        starts[0] = safeStart
+        for i in (0..<(count - 1)).reversed() {
+            let latestAllowed = safeEnd - minStep * Double(count - i)
+            if starts[i] > latestAllowed {
+                starts[i] = max(safeStart, latestAllowed)
+            }
+        }
+        for i in 1..<count {
+            if starts[i] < starts[i - 1] + minStep * 0.9 {
+                starts[i] = min(safeEnd - minStep * 0.5, starts[i - 1] + minStep * 0.9)
+            }
+        }
+
+        var result: [SubtitleWordTiming] = []
+        result.reserveCapacity(count)
+        for i in 0..<count {
+            let wStart = starts[i]
+            let nextStart = (i + 1 < count) ? starts[i + 1] : safeEnd
+            let wEnd = min(nextStart, max(wStart + 0.02, ends[i]))
+            result.append(SubtitleWordTiming(word: timings[i].word, startTime: wStart, endTime: max(wStart + 0.02, wEnd)))
+        }
+        return result
+    }
+
+    /// Partitions `rawText` into natural word/morpheme slices whose concatenation equals `rawText` (trimmed).
+    /// Preserves leading spaces on subsequent words and attaches trailing punctuation to its word.
+    public static func partitionIntoWordSlices(_ rawText: String) -> [String] {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = trimmed
+
+        var rawRanges: [Range<String.Index>] = []
+        tokenizer.enumerateTokens(in: trimmed.startIndex..<trimmed.endIndex) { range, _ in
+            rawRanges.append(range)
+            return true
+        }
+
+        guard !rawRanges.isEmpty else {
+            return [trimmed]
+        }
+
+        // Merge contractions and hyphenated compounds (e.g. "don't", "we're", "word-by-word") into single words
+        let joiners = CharacterSet(charactersIn: "'’`-")
+        var mergedRanges: [Range<String.Index>] = [rawRanges[0]]
+        for range in rawRanges.dropFirst() {
+            let prev = mergedRanges[mergedRanges.count - 1]
+            let gap = trimmed[prev.upperBound..<range.lowerBound]
+            if !gap.isEmpty && gap.unicodeScalars.allSatisfy({ joiners.contains($0) }) {
+                mergedRanges[mergedRanges.count - 1] = prev.lowerBound..<range.upperBound
+            } else {
+                mergedRanges.append(range)
+            }
+        }
+
+        let openingChars = CharacterSet(charactersIn: "([{\u{201C}\u{2018}「『《【（")
+        var slices: [String] = []
+        slices.reserveCapacity(mergedRanges.count)
+
+        var sliceStart = trimmed.startIndex
+        for i in 0..<mergedRanges.count {
+            let sliceEnd: String.Index
+            if i == mergedRanges.count - 1 {
+                sliceEnd = trimmed.endIndex
+            } else {
+                let nextWordStart = mergedRanges[i + 1].lowerBound
+                var cursor = mergedRanges[i].upperBound
+                while cursor < nextWordStart {
+                    let scalar = trimmed.unicodeScalars[cursor]
+                    if CharacterSet.whitespacesAndNewlines.contains(scalar) || openingChars.contains(scalar) {
+                        break
+                    }
+                    cursor = trimmed.index(after: cursor)
+                }
+                sliceEnd = cursor
+            }
+            let slice = String(trimmed[sliceStart..<sliceEnd])
+            if !slice.isEmpty {
+                slices.append(slice)
+            }
+            sliceStart = sliceEnd
+        }
+
+        return slices.isEmpty ? [trimmed] : slices
+    }
+
+    private static func speakingWeight(for wordSlice: String) -> Double {
+        let trimmed = wordSlice.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 1.0 }
+        var charWeight = 0.0
+        for scalar in trimmed.unicodeScalars {
+            if (0x4E00...0x9FFF).contains(scalar.value) ||
+               (0x3400...0x4DBF).contains(scalar.value) ||
+               (0x3040...0x30FF).contains(scalar.value) ||
+               (0xAC00...0xD7AF).contains(scalar.value) {
+                charWeight += 2.2
+            } else if CharacterSet.alphanumerics.contains(scalar) {
+                charWeight += 0.45
+            }
+        }
+        var weight = max(0.8, 1.0 + charWeight)
+        if let last = trimmed.last, ",.;:!?，。；：！？、…".contains(last) {
+            weight += 0.7
+        }
+        return weight
+    }
+
+    /// Synthesizes `[SubtitleWordTiming]` for `rawText` across `[startTime, endTime]`,
+    /// optionally following the spoken voice cadence and pauses of `referenceTimings`.
+    public static func synthesizeWordTimings(
+        for rawText: String,
+        startTime: TimeInterval,
+        endTime: TimeInterval,
+        referenceTimings: [SubtitleWordTiming]? = nil
+    ) -> [SubtitleWordTiming] {
+        let slices = partitionIntoWordSlices(rawText)
+        let safeStart = max(0, startTime)
+        let safeEnd = max(safeStart + 0.04, endTime)
+        guard !slices.isEmpty else { return [] }
+
+        if slices.count == 1 {
+            return [SubtitleWordTiming(word: slices[0], startTime: safeStart, endTime: safeEnd)]
+        }
+
+        // If referenceTimings has the exact same word count, map 1-to-1 directly onto the reference word timings
+        if let ref = referenceTimings, ref.count == slices.count {
+            let normalizedRef = normalizeWordTimings(ref, cueStart: safeStart, cueEnd: safeEnd)
+            return zip(slices, normalizedRef).map { slice, timing in
+                SubtitleWordTiming(word: slice, startTime: timing.startTime, endTime: timing.endTime)
+            }
+        }
+
+        let weights = slices.map { speakingWeight(for: $0) }
+        let totalWeight = max(0.01, weights.reduce(0, +))
+
+        func mapProgressToTime(_ progress: Double) -> TimeInterval {
+            let clamped = min(1.0, max(0.0, progress))
+            guard let ref = referenceTimings, ref.count >= 2 else {
+                return safeStart + clamped * (safeEnd - safeStart)
+            }
+            if clamped <= 0.0001 { return ref[0].startTime }
+            if clamped >= 0.9999 { return max(ref[ref.count - 1].endTime, safeEnd) }
+
+            let scaled = clamped * Double(ref.count)
+            let idx = min(ref.count - 1, max(0, Int(floor(scaled))))
+            let frac = scaled - Double(idx)
+            let wStart = ref[idx].startTime
+            let wEnd = max(wStart + 0.02, ref[idx].endTime)
+            return wStart + frac * (wEnd - wStart)
+        }
+
+        var accum = 0.0
+        var rawTimings: [SubtitleWordTiming] = []
+        rawTimings.reserveCapacity(slices.count)
+
+        for slice in slices {
+            let wWeight = speakingWeight(for: slice)
+            let pStart = accum / totalWeight
+            accum += wWeight
+            let pEnd = accum / totalWeight
+            let tStart = mapProgressToTime(pStart)
+            let tEnd = mapProgressToTime(pEnd)
+            rawTimings.append(SubtitleWordTiming(word: slice, startTime: tStart, endTime: max(tStart + 0.02, tEnd)))
+        }
+
+        return normalizeWordTimings(rawTimings, cueStart: safeStart, cueEnd: safeEnd)
+    }
+
+    /// Expands an array of phrase `SubtitleCue`s into progressive word-by-word `SubtitleCue` steps
+    /// so video subtitle burning and `.SRT` export reveal words one by one in lockstep with the voice.
+    public static func expandedWordByWordCues(
+        from cues: [SubtitleCue],
+        displayMode: SubtitleDisplayMode
+    ) -> [SubtitleCue] {
+        guard !cues.isEmpty else { return [] }
+        var expanded: [SubtitleCue] = []
+        let minStepDuration: TimeInterval = 0.04
+
+        for cue in cues {
+            let origWords = cue.resolvedOriginalWordTimings
+            let transWords = cue.resolvedTranslatedWordTimings
+
+            // Collect candidate transition timestamps according to the active display mode
+            var candidateTimes: [TimeInterval] = [cue.startTime]
+            switch displayMode {
+            case .originalOnly:
+                candidateTimes.append(contentsOf: origWords.map(\.startTime))
+            case .translatedOnly:
+                if let transWords, !transWords.isEmpty {
+                    candidateTimes.append(contentsOf: transWords.map(\.startTime))
+                } else {
+                    candidateTimes.append(contentsOf: origWords.map(\.startTime))
+                }
+            case .bilingual:
+                candidateTimes.append(contentsOf: origWords.map(\.startTime))
+                if let transWords, !transWords.isEmpty {
+                    candidateTimes.append(contentsOf: transWords.map(\.startTime))
+                }
+            }
+
+            let sortedTimes = candidateTimes
+                .map { min(cue.endTime, max(cue.startTime, $0)) }
+                .sorted()
+
+            // Coalesce transition timestamps that are within 42ms of each other
+            var distinctStarts: [TimeInterval] = []
+            for t in sortedTimes {
+                if t >= cue.endTime - minStepDuration * 0.5 {
+                    continue
+                }
+                if let last = distinctStarts.last {
+                    if t - last >= minStepDuration {
+                        distinctStarts.append(t)
+                    }
+                } else {
+                    distinctStarts.append(t)
+                }
+            }
+            if distinctStarts.isEmpty {
+                distinctStarts = [cue.startTime]
+            }
+
+            var cueSteps: [SubtitleCue] = []
+            for idx in 0..<distinctStarts.count {
+                let stepStart = distinctStarts[idx]
+                let stepEnd = (idx + 1 < distinctStarts.count) ? distinctStarts[idx + 1] : cue.endTime
+                guard stepEnd > stepStart + 0.01 else { continue }
+
+                let probeTime = stepStart + 0.01
+                let progOrig = cue.progressiveOriginalText(at: probeTime)
+                let progTrans = cue.progressiveTranslatedText(at: probeTime)
+
+                if let lastStep = cueSteps.last,
+                   lastStep.text == progOrig,
+                   lastStep.translatedText == progTrans {
+                    cueSteps[cueSteps.count - 1].endTime = stepEnd
+                } else {
+                    cueSteps.append(
+                        SubtitleCue(
+                            id: expanded.count + cueSteps.count + 1,
+                            startTime: stepStart,
+                            endTime: stepEnd,
+                            text: progOrig,
+                            translatedText: progTrans,
+                            preReviewTranslatedText: nil,
+                            isReviewedByGemma: cue.isReviewedByGemma,
+                            wordTimings: nil
+                        )
+                    )
+                }
+            }
+
+            if cueSteps.isEmpty {
+                expanded.append(
+                    SubtitleCue(
+                        id: expanded.count + 1,
+                        startTime: cue.startTime,
+                        endTime: cue.endTime,
+                        text: cue.text,
+                        translatedText: cue.translatedText,
+                        preReviewTranslatedText: cue.preReviewTranslatedText,
+                        isReviewedByGemma: cue.isReviewedByGemma,
+                        wordTimings: nil
+                    )
+                )
+            } else {
+                expanded.append(contentsOf: cueSteps)
+            }
+        }
+
+        for i in expanded.indices {
+            expanded[i] = SubtitleCue(
+                id: i + 1,
+                startTime: expanded[i].startTime,
+                endTime: expanded[i].endTime,
+                text: expanded[i].text,
+                translatedText: expanded[i].translatedText,
+                preReviewTranslatedText: expanded[i].preReviewTranslatedText,
+                isReviewedByGemma: expanded[i].isReviewedByGemma,
+                wordTimings: nil
+            )
+        }
+        return expanded
     }
 }
 
@@ -266,9 +735,14 @@ public enum SRTFormatter {
     }
 
     /// Generates a complete `.srt` file string from an array of `SubtitleCue`s using the requested `SubtitleDisplayMode`.
-    public static func format(cues: [SubtitleCue], displayMode: SubtitleDisplayMode = .translatedOnly) -> String {
+    public static func format(
+        cues: [SubtitleCue],
+        displayMode: SubtitleDisplayMode = .translatedOnly,
+        wordByWord: Bool = false
+    ) -> String {
         guard !cues.isEmpty else { return "" }
-        return cues.enumerated().map { index, cue in
+        let targetCues = wordByWord ? SubtitleCue.expandedWordByWordCues(from: cues, displayMode: displayMode) : cues
+        return targetCues.enumerated().map { index, cue in
             let seq = index + 1
             let start = formatTimestamp(cue.startTime)
             let end = formatTimestamp(cue.endTime)
@@ -285,9 +759,106 @@ public enum SRTFormatter {
                 startTime: cue.startTime,
                 endTime: cue.endTime,
                 text: cue.displayText(for: displayMode),
-                translatedText: nil
+                translatedText: nil,
+                wordTimings: cue.wordTimings
             )
         }
+    }
+
+    /// Collapses cumulative word-by-word `.srt` cues (where consecutive contiguous blocks are growing prefixes of the same line)
+    /// back into phrase `SubtitleCue`s while reconstructing their `wordTimings`.
+    public static func collapseWordByWordCues(_ rawCues: [SubtitleCue]) -> [SubtitleCue] {
+        guard rawCues.count >= 2 else { return rawCues }
+
+        func isCumulativeExtension(prev: String, next: String) -> Bool {
+            let pLines = prev.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            let nLines = next.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard pLines.count == nLines.count, !pLines.isEmpty else { return false }
+            var anyStrictExtension = false
+            for (p, n) in zip(pLines, nLines) {
+                guard !p.isEmpty, n.hasPrefix(p) else { return false }
+                if n.count > p.count {
+                    anyStrictExtension = true
+                }
+            }
+            return anyStrictExtension
+        }
+
+        // Check if the input actually contains cumulative sequences before collapsing
+        var cumulativePairs = 0
+        for i in 0..<(rawCues.count - 1) {
+            let gap = abs(rawCues[i + 1].startTime - rawCues[i].endTime)
+            if gap <= 0.06 && isCumulativeExtension(prev: rawCues[i].text, next: rawCues[i + 1].text) {
+                cumulativePairs += 1
+            }
+        }
+        guard cumulativePairs > 0 else { return rawCues }
+
+        var collapsed: [SubtitleCue] = []
+        var i = 0
+        while i < rawCues.count {
+            var group: [SubtitleCue] = [rawCues[i]]
+            while i + 1 < rawCues.count {
+                let curr = group[group.count - 1]
+                let next = rawCues[i + 1]
+                let gap = abs(next.startTime - curr.endTime)
+                if gap <= 0.06 && isCumulativeExtension(prev: curr.text, next: next.text) {
+                    group.append(next)
+                    i += 1
+                } else {
+                    break
+                }
+            }
+
+            if group.count == 1 {
+                var single = group[0]
+                single = SubtitleCue(
+                    id: collapsed.count + 1,
+                    startTime: single.startTime,
+                    endTime: single.endTime,
+                    text: single.text,
+                    translatedText: single.translatedText,
+                    preReviewTranslatedText: single.preReviewTranslatedText,
+                    isReviewedByGemma: single.isReviewedByGemma,
+                    wordTimings: single.wordTimings
+                )
+                collapsed.append(single)
+            } else {
+                let first = group[0]
+                let last = group[group.count - 1]
+                var extractedTimings: [SubtitleWordTiming] = []
+                var prevFirstLine = ""
+                for step in group {
+                    let firstLine = step.text.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces) ?? step.text
+                    if firstLine.hasPrefix(prevFirstLine) {
+                        let delta = String(firstLine.dropFirst(prevFirstLine.count))
+                        if !delta.isEmpty {
+                            extractedTimings.append(
+                                SubtitleWordTiming(word: delta, startTime: step.startTime, endTime: step.endTime)
+                            )
+                        } else if !extractedTimings.isEmpty {
+                            extractedTimings[extractedTimings.count - 1].endTime = step.endTime
+                        }
+                    }
+                    prevFirstLine = firstLine
+                }
+
+                collapsed.append(
+                    SubtitleCue(
+                        id: collapsed.count + 1,
+                        startTime: first.startTime,
+                        endTime: last.endTime,
+                        text: last.text,
+                        translatedText: last.translatedText,
+                        preReviewTranslatedText: last.preReviewTranslatedText,
+                        isReviewedByGemma: last.isReviewedByGemma,
+                        wordTimings: extractedTimings.isEmpty ? nil : extractedTimings
+                    )
+                )
+            }
+            i += 1
+        }
+        return collapsed
     }
 
     /// Parses a `.srt` file string into `[SubtitleCue]`.

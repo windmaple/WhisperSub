@@ -53,7 +53,8 @@ public final class SubtitleTranslationService: ObservableObject {
                 text: cue.text,
                 translatedText: nil,
                 preReviewTranslatedText: nil,
-                isReviewedByGemma: false
+                isReviewedByGemma: false,
+                wordTimings: cue.wordTimings
             )
         }
 

@@ -117,6 +117,11 @@ public final class AppViewModel: ObservableObject {
             refreshSRTText()
         }
     }
+    @Published public var wordByWordSubtitles: Bool = true {
+        didSet {
+            refreshSRTText()
+        }
+    }
     @Published public var isTranslating: Bool = false
     @Published public var translationProgress: Double = 0.0
     @Published public var translatedLanguage: TranslationLanguage?
@@ -354,6 +359,16 @@ public final class AppViewModel: ObservableObject {
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
+    public func seekToWord(_ wordTiming: SubtitleWordTiming, in cue: SubtitleCue) {
+        selectedCueID = cue.id
+        lastManualSeekDate = Date()
+        let clampedTime = min(cue.endTime - 0.005, max(cue.startTime, wordTiming.startTime + 0.01))
+        currentPlaybackTime = clampedTime
+        guard let player else { return }
+        let target = CMTime(seconds: max(0, clampedTime), preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
     public func seekPlayer(to seconds: TimeInterval) {
         lastManualSeekDate = Date()
         currentPlaybackTime = seconds
@@ -363,7 +378,7 @@ public final class AppViewModel: ObservableObject {
     }
 
     private func setupTimeObserver(for player: AVPlayer) {
-        let interval = CMTime(seconds: 0.05, preferredTimescale: 600)
+        let interval = CMTime(seconds: 0.025, preferredTimescale: 600)
         let token = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self, weak player] time in
             let secs = CMTimeGetSeconds(time)
             if secs.isFinite {
@@ -372,12 +387,7 @@ public final class AppViewModel: ObservableObject {
                     let isPlaying = (player?.rate ?? 0) != 0
                     if !isPlaying {
                         if let manualDate = self.lastManualSeekDate,
-                           Date().timeIntervalSince(manualDate) < 1.0 {
-                            return
-                        }
-                        if let selectedID = self.selectedCueID,
-                           let selected = self.cues.first(where: { $0.id == selectedID }),
-                           abs(secs - selected.startTime) < 0.15 {
+                           Date().timeIntervalSince(manualDate) < 0.35 {
                             return
                         }
                     } else if let selectedID = self.selectedCueID,
@@ -622,6 +632,14 @@ public final class AppViewModel: ObservableObject {
                 let shiftedStart = max(0, absStart - range.start)
                 let shiftedEnd = min(clipDuration, absEnd - range.start)
                 guard shiftedEnd > shiftedStart + 0.05 else { continue }
+                let shiftedWordTimings: [SubtitleWordTiming]? = cue.wordTimings?.compactMap { wt in
+                    let absWStart = wt.startTime + previousOffset
+                    let absWEnd = wt.endTime + previousOffset
+                    guard absWEnd > range.start + 0.01, absWStart < range.end - 0.01 else { return nil }
+                    let wStart = max(shiftedStart, absWStart - range.start)
+                    let wEnd = min(shiftedEnd, max(wStart + 0.02, absWEnd - range.start))
+                    return SubtitleWordTiming(word: wt.word, startTime: wStart, endTime: wEnd)
+                }
                 sliced.append(
                     SubtitleCue(
                         id: sliced.count + 1,
@@ -630,7 +648,8 @@ public final class AppViewModel: ObservableObject {
                         text: cue.text,
                         translatedText: cue.translatedText,
                         preReviewTranslatedText: cue.preReviewTranslatedText,
-                        isReviewedByGemma: cue.isReviewedByGemma
+                        isReviewedByGemma: cue.isReviewedByGemma,
+                        wordTimings: shiftedWordTimings
                     )
                 )
             }
@@ -656,7 +675,11 @@ public final class AppViewModel: ObservableObject {
     // MARK: - Transcription & Translation
 
     public func refreshSRTText() {
-        srtText = SRTFormatter.format(cues: cues, displayMode: subtitleDisplayMode)
+        srtText = SRTFormatter.format(
+            cues: cues,
+            displayMode: subtitleDisplayMode,
+            wordByWord: wordByWordSubtitles
+        )
         if let activeVideo = videoURL, !cues.isEmpty {
             let candidate = companionSRTURL(for: activeVideo)
             if FileManager.default.fileExists(atPath: candidate.path) {
@@ -1135,7 +1158,8 @@ public final class AppViewModel: ObservableObject {
                 text: cue.text,
                 translatedText: restored,
                 preReviewTranslatedText: nil,
-                isReviewedByGemma: false
+                isReviewedByGemma: false,
+                wordTimings: cue.wordTimings
             )
         }
         gemmaReviewService.resetState()
@@ -1151,7 +1175,14 @@ public final class AppViewModel: ObservableObject {
     public func clearTranslations() {
         guard hasTranslatedCues, !isBusy else { return }
         let clearedCues = cues.map { cue in
-            SubtitleCue(id: cue.id, startTime: cue.startTime, endTime: cue.endTime, text: cue.text, translatedText: nil)
+            SubtitleCue(
+                id: cue.id,
+                startTime: cue.startTime,
+                endTime: cue.endTime,
+                text: cue.text,
+                translatedText: nil,
+                wordTimings: cue.wordTimings
+            )
         }
         translationService.resetState()
         gemmaReviewService.resetState()
@@ -1198,8 +1229,23 @@ public final class AppViewModel: ObservableObject {
         else {
             return false
         }
-        cues[idx].startTime = max(0, parsedStart)
-        cues[idx].endTime = parsedEnd
+        let oldStart = cues[idx].startTime
+        let oldEnd = cues[idx].endTime
+        let oldSpan = max(0.05, oldEnd - oldStart)
+        let newStart = max(0, parsedStart)
+        let newEnd = parsedEnd
+        let newSpan = max(0.05, newEnd - newStart)
+        if let existingWords = cues[idx].wordTimings, !existingWords.isEmpty {
+            cues[idx].wordTimings = existingWords.map { wt in
+                let relStart = min(1.0, max(0.0, (wt.startTime - oldStart) / oldSpan))
+                let relEnd = min(1.0, max(relStart, (wt.endTime - oldStart) / oldSpan))
+                let scaledStart = newStart + relStart * newSpan
+                let scaledEnd = max(scaledStart + 0.02, newStart + relEnd * newSpan)
+                return SubtitleWordTiming(word: wt.word, startTime: scaledStart, endTime: min(newEnd, scaledEnd))
+            }
+        }
+        cues[idx].startTime = newStart
+        cues[idx].endTime = newEnd
         refreshSRTText()
         scheduleDebouncedSave()
         return true
@@ -1216,7 +1262,8 @@ public final class AppViewModel: ObservableObject {
                 text: cues[i].text,
                 translatedText: cues[i].translatedText,
                 preReviewTranslatedText: cues[i].preReviewTranslatedText,
-                isReviewedByGemma: cues[i].isReviewedByGemma
+                isReviewedByGemma: cues[i].isReviewedByGemma,
+                wordTimings: cues[i].wordTimings
             )
         }
         if selectedCueID == id {
@@ -1262,7 +1309,8 @@ public final class AppViewModel: ObservableObject {
                 text: cues[i].text,
                 translatedText: cues[i].translatedText,
                 preReviewTranslatedText: cues[i].preReviewTranslatedText,
-                isReviewedByGemma: cues[i].isReviewedByGemma
+                isReviewedByGemma: cues[i].isReviewedByGemma,
+                wordTimings: cues[i].wordTimings
             )
         }
         selectedCueID = insertIndex + 1
@@ -1274,12 +1322,13 @@ public final class AppViewModel: ObservableObject {
     }
 
     public func applyRawSRTEdits(_ rawContent: String) {
-        let parsed = SRTFormatter.parse(rawContent)
+        let parsed = SRTFormatter.collapseWordByWordCues(SRTFormatter.parse(rawContent))
         guard !parsed.isEmpty else { return }
 
         let oldByID = Dictionary(uniqueKeysWithValues: cues.map { ($0.id, $0) })
         let updated: [SubtitleCue] = parsed.map { block in
             let prev = oldByID[block.id]
+            let resolvedWordTimings = block.wordTimings ?? prev?.wordTimings
             switch subtitleDisplayMode {
             case .bilingual:
                 let (orig, trans) = Self.splitBilingualCueText(
@@ -1295,7 +1344,8 @@ public final class AppViewModel: ObservableObject {
                     text: orig,
                     translatedText: trans,
                     preReviewTranslatedText: prev?.preReviewTranslatedText,
-                    isReviewedByGemma: prev?.isReviewedByGemma ?? false
+                    isReviewedByGemma: prev?.isReviewedByGemma ?? false,
+                    wordTimings: resolvedWordTimings
                 )
             case .translatedOnly:
                 if hasTranslatedCues || translatedLanguage != nil {
@@ -1306,7 +1356,8 @@ public final class AppViewModel: ObservableObject {
                         text: prev?.text ?? block.text,
                         translatedText: block.text,
                         preReviewTranslatedText: prev?.preReviewTranslatedText,
-                        isReviewedByGemma: prev?.isReviewedByGemma ?? false
+                        isReviewedByGemma: prev?.isReviewedByGemma ?? false,
+                        wordTimings: resolvedWordTimings
                     )
                 } else {
                     return block
@@ -1319,7 +1370,8 @@ public final class AppViewModel: ObservableObject {
                     text: block.text,
                     translatedText: prev?.translatedText,
                     preReviewTranslatedText: prev?.preReviewTranslatedText,
-                    isReviewedByGemma: prev?.isReviewedByGemma ?? false
+                    isReviewedByGemma: prev?.isReviewedByGemma ?? false,
+                    wordTimings: resolvedWordTimings
                 )
             }
         }
@@ -1475,7 +1527,7 @@ public final class AppViewModel: ObservableObject {
         // 2. Otherwise, load from the freshest companion .srt files on disk
         var baseCues: [SubtitleCue] = []
         if let rawOrig = try? String(contentsOf: companionSRT, encoding: .utf8) {
-            baseCues = SRTFormatter.parse(rawOrig)
+            baseCues = SRTFormatter.collapseWordByWordCues(SRTFormatter.parse(rawOrig))
         }
 
         // Pick whichever translation file (_bilingual_<lang>.srt vs _<lang>.srt) was modified more recently
@@ -1498,7 +1550,7 @@ public final class AppViewModel: ObservableObject {
 
         if let transSource = chosenTranslationSource,
            let rawTrans = try? String(contentsOf: transSource.url, encoding: .utf8) {
-            let transParsed = SRTFormatter.parse(rawTrans)
+            let transParsed = SRTFormatter.collapseWordByWordCues(SRTFormatter.parse(rawTrans))
 
             // Only apply translation file if baseCues is empty OR its cue count matches baseCues
             // (and if baseCues is newer than transSource by > 10s with different cues, prefer fresh baseCues)
@@ -1516,7 +1568,8 @@ public final class AppViewModel: ObservableObject {
                             startTime: cue.startTime,
                             endTime: cue.endTime,
                             text: orig,
-                            translatedText: trans
+                            translatedText: trans,
+                            wordTimings: cue.wordTimings
                         )
                     }
                 } else {
@@ -1646,10 +1699,14 @@ public final class AppViewModel: ObservableObject {
 
         if panel.runModal() == .OK, let targetURL = panel.url {
             do {
-                let content = SRTFormatter.format(cues: cues, displayMode: subtitleDisplayMode)
+                let content = SRTFormatter.format(
+                    cues: cues,
+                    displayMode: subtitleDisplayMode,
+                    wordByWord: wordByWordSubtitles
+                )
                 try content.write(to: targetURL, atomically: true, encoding: .utf8)
                 lastSavedSRTURL = targetURL
-                statusMessage = "Saved subtitles (\(subtitleDisplayMode.compactLabel)) to \(targetURL.lastPathComponent)."
+                statusMessage = "Saved subtitles (\(subtitleDisplayMode.compactLabel)\(wordByWordSubtitles ? ", word-by-word" : "")) to \(targetURL.lastPathComponent)."
             } catch {
                 errorMessage = "Could not save .srt file: \(error.localizedDescription)"
             }
@@ -1658,7 +1715,7 @@ public final class AppViewModel: ObservableObject {
 
     public func applyImportedSRTFile(url: URL) throws {
         let raw = try String(contentsOf: url, encoding: .utf8)
-        let parsed = SRTFormatter.parse(raw)
+        let parsed = SRTFormatter.collapseWordByWordCues(SRTFormatter.parse(raw))
         let fileNameLower = url.deletingPathExtension().lastPathComponent.lowercased()
         let isBilingualFile = fileNameLower.contains("_bilingual")
 
@@ -1679,7 +1736,8 @@ public final class AppViewModel: ObservableObject {
                     startTime: cue.startTime,
                     endTime: cue.endTime,
                     text: orig,
-                    translatedText: trans
+                    translatedText: trans,
+                    wordTimings: cue.wordTimings
                 )
             }
         } else {
@@ -1719,7 +1777,7 @@ public final class AppViewModel: ObservableObject {
         guard !srtText.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(srtText, forType: .string)
-        statusMessage = "Copied .SRT content (\(cues.count) cues, \(subtitleDisplayMode.compactLabel)) to clipboard."
+        statusMessage = "Copied .SRT content (\(cues.count) cues, \(subtitleDisplayMode.compactLabel)\(wordByWordSubtitles ? ", word-by-word" : "")) to clipboard."
     }
 
     // MARK: - Burn Subtitles into Video
@@ -1744,10 +1802,11 @@ public final class AppViewModel: ObservableObject {
         isBurning = true
         burnProgress = 0.0
         errorMessage = nil
-        statusMessage = "Burning \(cues.count) subtitles (\(subtitleDisplayMode.compactLabel)) into video…"
+        statusMessage = "Burning \(cues.count) subtitles (\(subtitleDisplayMode.compactLabel)\(wordByWordSubtitles ? ", word-by-word" : "")) into video…"
 
         let currentCues = self.cues
         let currentDisplayMode = self.subtitleDisplayMode
+        let currentWordByWord = self.wordByWordSubtitles
 
         Task { [self] in
             defer {
@@ -1760,6 +1819,7 @@ public final class AppViewModel: ObservableObject {
                     outputURL: outputURL,
                     cues: currentCues,
                     displayMode: currentDisplayMode,
+                    wordByWord: currentWordByWord,
                     progressHandler: { progress in
                         Task { @MainActor [weak self] in
                             self?.burnProgress = progress
@@ -1768,10 +1828,10 @@ public final class AppViewModel: ObservableObject {
                 )
                 self.burnProgress = 1.0
                 self.lastBurnedVideoURL = outputURL
-                self.statusMessage = "Burned subtitles (\(currentDisplayMode.compactLabel)) into \(outputURL.lastPathComponent)!"
+                self.statusMessage = "Burned subtitles (\(currentDisplayMode.compactLabel)\(currentWordByWord ? ", word-by-word" : "")) into \(outputURL.lastPathComponent)!"
                 self.postCompletionNotification(
                     title: "Subtitle Burn Complete",
-                    message: "Burned \(currentCues.count) subtitles (\(currentDisplayMode.compactLabel)) into \(outputURL.lastPathComponent).",
+                    message: "Burned \(currentCues.count) subtitles (\(currentDisplayMode.compactLabel)\(currentWordByWord ? ", word-by-word" : "")) into \(outputURL.lastPathComponent).",
                     systemImage: "flame.fill"
                 )
                 if !self.hasPlayablePreview {

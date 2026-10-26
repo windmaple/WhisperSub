@@ -23,7 +23,7 @@ struct WhisperSubMain {
     @MainActor
     private static func runCLIMode(args: [String]) async {
         guard let inputPath = args.first else {
-            fputs("Usage: WhisperSub --cli <input-video> [--start <time>] [--end <time>] [--clip-out <clip.mp4>] [--translate <lang>] [--bilingual] [--whisper-translate] [--gemma-review] [--gemma-model <e4b|e2b>] [--gemma-prompt <notes>] [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
+            fputs("Usage: WhisperSub --cli <input-video> [--start <time>] [--end <time>] [--clip-out <clip.mp4>] [--translate <lang>] [--bilingual] [--word-by-word|--no-word-by-word] [--whisper-translate] [--gemma-review] [--gemma-model <e4b|e2b>] [--gemma-prompt <notes>] [--srt <out.srt>] [--burn <out.mp4>] [--burn-only] [--model <model_id>]\n", stderr)
             exit(1)
         }
 
@@ -36,6 +36,7 @@ struct WhisperSubMain {
         var clipEndArg: String?
         var translateLangArg: String?
         var bilingualMode = false
+        var wordByWord = true
         var whisperDirectTranslate = false
         var gemmaReviewEnabled = false
         var gemmaModelOption = GemmaModelOption.defaultModel
@@ -68,6 +69,10 @@ struct WhisperSubMain {
                 }
             case "--bilingual":
                 bilingualMode = true
+            case "--word-by-word":
+                wordByWord = true
+            case "--no-word-by-word", "--full-line":
+                wordByWord = false
             case "--whisper-translate":
                 whisperDirectTranslate = true
             case "--gemma-review":
@@ -160,7 +165,7 @@ struct WhisperSubMain {
             var cues: [SubtitleCue]
             if burnOnly, FileManager.default.fileExists(atPath: srtOutURL.path) {
                 let raw = try String(contentsOf: srtOutURL, encoding: .utf8)
-                cues = SRTFormatter.parse(raw)
+                cues = SRTFormatter.collapseWordByWordCues(SRTFormatter.parse(raw))
                 print("📝 Loaded \(cues.count) existing subtitle segment(s) from: \(srtOutURL.path)")
             } else {
                 let service = WhisperTranscriptionService()
@@ -211,18 +216,19 @@ struct WhisperSubMain {
             }
 
             if !burnOnly || effectiveTranslateLang != nil {
-                let srtContent = SRTFormatter.format(cues: cues, displayMode: displayMode)
+                let srtContent = SRTFormatter.format(cues: cues, displayMode: displayMode, wordByWord: wordByWord)
                 try srtContent.write(to: srtOutURL, atomically: true, encoding: .utf8)
-                print("📝 Saved .SRT file (\(displayMode.compactLabel)) to: \(srtOutURL.path)")
+                print("📝 Saved .SRT file (\(displayMode.compactLabel)\(wordByWord ? ", word-by-word" : "")) to: \(srtOutURL.path)")
             }
 
             if let burnURL = burnOutURL {
-                print("🔥 Burning subtitles (\(displayMode.compactLabel)) into video: \(burnURL.path)")
+                print("🔥 Burning subtitles (\(displayMode.compactLabel)\(wordByWord ? ", word-by-word" : "")) into video: \(burnURL.path)")
                 try await VideoSubtitleBurner.burnSubtitles(
                     sourceURL: activeVideoURL,
                     outputURL: burnURL,
                     cues: cues,
                     displayMode: displayMode,
+                    wordByWord: wordByWord,
                     progressHandler: { _ in }
                 )
                 print("✅ Exported burned video to: \(burnURL.path)")

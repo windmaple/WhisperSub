@@ -70,14 +70,14 @@ public final class SubtitleOverlayCache: @unchecked Sendable {
 
     public func activeCue(at timeSeconds: TimeInterval) -> SubtitleCue? {
         for cue in cues {
-            if timeSeconds >= cue.startTime && timeSeconds <= cue.endTime {
+            if timeSeconds >= cue.startTime && timeSeconds < cue.endTime {
                 return cue
             }
             if cue.startTime > timeSeconds {
                 break
             }
         }
-        return nil
+        return cues.last(where: { timeSeconds >= $0.startTime && timeSeconds <= $0.endTime })
     }
 
     public func overlayImage(for cue: SubtitleCue) -> CIImage? {
@@ -643,7 +643,8 @@ public enum VideoSubtitleBurner {
     public static func makeVideoComposition(
         for asset: AVAsset,
         cues: [SubtitleCue],
-        displayMode: SubtitleDisplayMode = .translatedOnly
+        displayMode: SubtitleDisplayMode = .translatedOnly,
+        wordByWord: Bool = true
     ) async throws -> AVMutableVideoComposition {
         let tracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = tracks.first else {
@@ -658,8 +659,11 @@ public enum VideoSubtitleBurner {
             height: max(2, abs(transformedRect.height).rounded())
         )
 
-        let sortedCues = cues.sorted { $0.startTime < $1.startTime }
-        let overlayCache = SubtitleOverlayCache(cues: sortedCues, renderSize: renderSize, displayMode: displayMode)
+        let sortedBase = cues.sorted { $0.startTime < $1.startTime }
+        let effectiveCues = wordByWord
+            ? SubtitleCue.expandedWordByWordCues(from: sortedBase, displayMode: displayMode)
+            : sortedBase
+        let overlayCache = SubtitleOverlayCache(cues: effectiveCues, renderSize: renderSize, displayMode: displayMode)
 
         let composition = try await AVMutableVideoComposition.videoComposition(
             with: asset,
@@ -695,11 +699,17 @@ public enum VideoSubtitleBurner {
         outputURL: URL,
         cues: [SubtitleCue],
         displayMode: SubtitleDisplayMode = .translatedOnly,
+        wordByWord: Bool = true,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
             try FileManager.default.removeItem(at: outputURL)
         }
+
+        let sortedBase = cues.sorted { $0.startTime < $1.startTime }
+        let effectiveCues = wordByWord
+            ? SubtitleCue.expandedWordByWordCues(from: sortedBase, displayMode: displayMode)
+            : sortedBase
 
         let asset = AVURLAsset(url: sourceURL)
         let nativeVideoTracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
@@ -714,7 +724,7 @@ public enum VideoSubtitleBurner {
                 ffmpegPath: ffmpegPath,
                 sourceURL: sourceURL,
                 outputURL: outputURL,
-                cues: cues,
+                cues: effectiveCues,
                 displayMode: displayMode,
                 videoSize: meta.size,
                 totalDuration: meta.duration,
@@ -724,7 +734,12 @@ public enum VideoSubtitleBurner {
         }
 
         do {
-            let videoComposition = try await makeVideoComposition(for: asset, cues: cues, displayMode: displayMode)
+            let videoComposition = try await makeVideoComposition(
+                for: asset,
+                cues: sortedBase,
+                displayMode: displayMode,
+                wordByWord: wordByWord
+            )
 
             guard let exportSession = AVAssetExportSession(
                 asset: asset,
@@ -772,7 +787,7 @@ public enum VideoSubtitleBurner {
                     ffmpegPath: ffmpegPath,
                     sourceURL: sourceURL,
                     outputURL: outputURL,
-                    cues: cues,
+                    cues: effectiveCues,
                     displayMode: displayMode,
                     videoSize: meta.size,
                     totalDuration: meta.duration,

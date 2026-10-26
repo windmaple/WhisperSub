@@ -254,13 +254,23 @@ public struct ContentView: View {
             }
 
             if let cue = viewModel.activeSubtitleCue, !viewModel.isPlayingBurnedVideo {
+                let liveOriginal = viewModel.wordByWordSubtitles
+                    ? cue.progressiveOriginalText(at: viewModel.currentPlaybackTime)
+                    : cue.text
+                let liveTranslated = viewModel.wordByWordSubtitles
+                    ? cue.progressiveTranslatedText(at: viewModel.currentPlaybackTime)
+                    : cue.translatedText
+                let liveSingleDisplay = viewModel.wordByWordSubtitles
+                    ? cue.progressiveDisplayText(at: viewModel.currentPlaybackTime, for: viewModel.subtitleDisplayMode)
+                    : cue.displayText(for: viewModel.subtitleDisplayMode)
+
                 Group {
                     if viewModel.subtitleDisplayMode == .bilingual,
-                       let translated = cue.translatedText,
+                       let translated = liveTranslated,
                        !translated.isEmpty,
-                       translated != cue.text {
+                       translated != liveOriginal {
                         VStack(spacing: 3) {
-                            Text(cue.text)
+                            Text(liveOriginal)
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(.white.opacity(0.86))
                                 .multilineTextAlignment(.center)
@@ -273,7 +283,7 @@ public struct ContentView: View {
                         }
                         .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        Text(cue.displayText(for: viewModel.subtitleDisplayMode))
+                        Text(liveSingleDisplay)
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.white)
                             .multilineTextAlignment(.center)
@@ -473,6 +483,12 @@ public struct ContentView: View {
                     .font(.system(size: 11, weight: .medium))
                     .disabled(viewModel.isBusy)
                     .help("Automatically translate subtitles after Whisper transcription completes")
+
+                Toggle("Word-by-Word", isOn: $viewModel.wordByWordSubtitles)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11, weight: .medium))
+                    .disabled(viewModel.isBusy)
+                    .help("Reveal subtitles progressively word-by-word, aligned to the spoken voice in preview, burned video, and .SRT export")
 
                 if viewModel.targetLanguage.id == "en" && viewModel.subtitleDisplayMode == .translatedOnly {
                     Toggle("Whisper Audio→EN", isOn: $viewModel.useWhisperDirectAudioTranslate)
@@ -1084,6 +1100,7 @@ private struct EditableSubtitleCueRow: View {
             leadingPlayColumn
             VStack(alignment: .leading, spacing: 6) {
                 headerRow
+                wordTimingStripView
                 contentEditorStack
             }
         }
@@ -1165,6 +1182,52 @@ private struct EditableSubtitleCueRow: View {
             Spacer()
 
             headerActionButtons
+        }
+    }
+
+    @ViewBuilder
+    private var wordTimingStripView: some View {
+        if isActive && viewModel.wordByWordSubtitles {
+            let words = cue.resolvedOriginalWordTimings
+            if words.count > 1 {
+                let activeIdx = cue.activeOriginalWordIndex(at: viewModel.currentPlaybackTime) ?? 0
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.trailing, 2)
+                        ForEach(Array(words.enumerated()), id: \.offset) { idx, wt in
+                            let isCurrentWord = (idx == activeIdx)
+                            let isSpokenWord = (idx <= activeIdx)
+                            Button {
+                                viewModel.seekToWord(wt, in: cue)
+                            } label: {
+                                Text(wt.word.trimmingCharacters(in: .whitespacesAndNewlines))
+                                    .font(.system(size: 10.5, weight: isCurrentWord ? .bold : .medium))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(
+                                        Capsule(style: .continuous)
+                                            .fill(
+                                                isCurrentWord
+                                                    ? Color.accentColor
+                                                    : (isSpokenWord ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06))
+                                            )
+                                    )
+                                    .foregroundStyle(
+                                        isCurrentWord
+                                            ? Color.white
+                                            : (isSpokenWord ? Color.primary : Color.secondary)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help("\(SRTFormatter.formatShortTimestamp(wt.startTime)) – \(SRTFormatter.formatShortTimestamp(wt.endTime)) (click to seek)")
+                        }
+                    }
+                    .padding(.vertical, 1)
+                }
+            }
         }
     }
 
